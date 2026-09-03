@@ -90,6 +90,108 @@ func runCLI(a) (code) {
     }
   }
 
+  if a[1] == "cron" {
+    if a[2] == "create" {
+      schedule := ""
+      script := ""
+      input := "{}"
+      i := 4
+      while i < len(a) {
+        if a[i] == "--schedule" { if i+1 < len(a) { schedule = a[i+1] } }
+        if a[i] == "--script" { if i+1 < len(a) { script = a[i+1] } }
+        if a[i] == "--input" { if i+1 < len(a) { input = a[i+1] } }
+        i = i + 1
+      }
+      out, err := createJob(db, a[3], schedule, script, input)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"job\":" + out + "}")
+      return
+    }
+    if a[2] == "list" {
+      jobs, count := listJobs(db)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"jobs\":" + jobs + "}")
+      return
+    }
+    if a[2] == "run" {
+      out, err := runJob(db, a[3])
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"result\":" + out + "}")
+      return
+    }
+    if a[2] == "tick" {
+      println("{\"ok\":true,\"fired\":" + str(tickCron(db)) + "}")
+      return
+    }
+    if a[2] == "delete" {
+      err := deleteJob(db, a[3])
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"deleted\":true}")
+      return
+    }
+  }
+
+  if a[1] == "events" {
+    if a[2] == "emit" {
+      level := ""
+      source := ""
+      subject := ""
+      data := "{}"
+      i := 5
+      while i < len(a) {
+        if a[i] == "--level" { if i+1 < len(a) { level = a[i+1] } }
+        if a[i] == "--source" { if i+1 < len(a) { source = a[i+1] } }
+        if a[i] == "--subject" { if i+1 < len(a) { subject = a[i+1] } }
+        if a[i] == "--data" { if i+1 < len(a) { data = a[i+1] } }
+        i = i + 1
+      }
+      out, err := emitEvent(db, a[3], a[4], level, source, subject, data)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"event\":" + out + "}")
+      return
+    }
+    if a[2] == "streams" {
+      streams, count := listStreams(db)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"streams\":" + streams + "}")
+      return
+    }
+  }
+
+  if a[1] == "script" {
+    if a[2] == "create" {
+      source := ""
+      description := ""
+      timeout := 5000
+      allowNet := ""
+      i := 4
+      while i < len(a) {
+        if a[i] == "--file" {
+          if i+1 < len(a) {
+            if a[i+1] == "-" { source = read_stdin() } else { source = read_file(a[i+1]) }
+          }
+        }
+        if a[i] == "--description" { if i+1 < len(a) { description = a[i+1] } }
+        if a[i] == "--timeout" { if i+1 < len(a) { timeout = parse_int(a[i+1]) } }
+        if a[i] == "--allow-net" { if i+1 < len(a) { allowNet = a[i+1] } }
+        i = i + 1
+      }
+      out, err := createScript(db, a[3], source, description, timeout, allowNet)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"script\":" + out + "}")
+      return
+    }
+    if a[2] == "list" {
+      scripts, count := listScripts(db)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"scripts\":" + scripts + "}")
+      return
+    }
+    if a[2] == "delete" {
+      err := deleteScript(db, a[3])
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"deleted\":true}")
+      return
+    }
+  }
+
   println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
   code = 80
 }

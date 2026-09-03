@@ -1,0 +1,221 @@
+// cron — scheduled script runs.
+//
+// Two schedule shapes: a five-field cron expression (minute hour dom month
+// dow), and `@every <duration>` for sub-minute work that a cron expression
+// cannot express at all. The scheduler ticks every second and asks each job
+// whether it is due, rather than computing a next-fire time: a due check is
+// idempotent, so a slow tick or a restart cannot skip or double-fire a job.
+//
+// Every run emits an event (cron.ok / cron.error) into the `cron` stream, so
+// the scheduler's history is queryable with the same tools as everything
+// else instead of living in a log file.
+
+func cronSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS cron_jobs (name TEXT PRIMARY KEY, schedule TEXT NOT NULL, script TEXT NOT NULL, input TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, last_run_at INTEGER NOT NULL DEFAULT 0, last_status TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', runs INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+}
+
+// --- schedule parsing -----------------------------------------------------
+
+func stripZeros(s) (out) {
+  out = s
+  while len(out) > 1 {
+    if substr(out, 0, 1) != "0" { return }
+    out = substr(out, 1, len(out))
+  }
+}
+
+func numOf(s) (n) {
+  v := stripZeros(s)
+  n = 0
+  if looksNumeric(v) { n = int(parse(v, 0)) }
+}
+
+// fieldMatches handles the four cron field shapes: *, */n, a-b, and a list of
+// either. Anything else fails closed — an unparseable field never matches.
+func fieldMatches(field, value) (ok) {
+  ok = false
+  if field == "*" { ok = true  return }
+  for _, part := range split(field, ",") {
+    if part == "*" { ok = true  return }
+    if has_prefix(part, "*/") {
+      step := numOf(substr(part, 2, len(part)))
+      if step > 0 {
+        if value % step == 0 { ok = true  return }
+      }
+      continue
+    }
+    dash := index(part, "-")
+    if dash > 0 {
+      lo := numOf(substr(part, 0, dash))
+      hi := numOf(substr(part, dash + 1, len(part)))
+      if value >= lo {
+        if value <= hi { ok = true  return }
+      }
+      continue
+    }
+    if looksNumeric(stripZeros(part)) {
+      if numOf(part) == value { ok = true  return }
+    }
+  }
+}
+
+func validSchedule(expr) (ok) {
+  ok = false
+  if has_prefix(expr, "@every ") {
+    if parseAge(trim(substr(expr, 7, len(expr)))) > 0 { ok = true }
+    return
+  }
+  if len(split(expr, " ")) == 5 { ok = true }
+}
+
+// dueNow answers whether a job should fire at `ts`. For cron expressions the
+// guard is the minute itself: a job fires at most once per matching minute
+// however often the scheduler asks.
+func dueNow(expr, lastRun, ts) (due) {
+  due = false
+  if has_prefix(expr, "@every ") {
+    every := parseAge(trim(substr(expr, 7, len(expr))))
+    if every <= 0 { return }
+    if ts - lastRun >= every { due = true }
+    return
+  }
+  fields := split(expr, " ")
+  if len(fields) != 5 { return }
+  if !fieldMatches(fields[0], numOf(time_format_utc(ts, "%M"))) { return }
+  if !fieldMatches(fields[1], numOf(time_format_utc(ts, "%H"))) { return }
+  if !fieldMatches(fields[2], numOf(time_format_utc(ts, "%d"))) { return }
+  if !fieldMatches(fields[3], numOf(time_format_utc(ts, "%m"))) { return }
+  if !fieldMatches(fields[4], numOf(time_format_utc(ts, "%w"))) { return }
+  // same minute as the last run -> already fired
+  if time_format_utc(lastRun, "%Y%m%d%H%M") == time_format_utc(ts, "%Y%m%d%H%M") { return }
+  due = true
+}
+
+// --- jobs -----------------------------------------------------------------
+
+type JobRow struct { name string  schedule string  script string  input string  enabled int  last_run_at int  last_status string  last_error string  runs int  created_at string  updated_at string }
+
+func jobJSON(j) (s) {
+  s = "{\"name\":" + jsonQuote(j.name) + ",\"schedule\":" + jsonQuote(j.schedule) + ",\"script\":" + jsonQuote(j.script) + ",\"input\":" + j.input + ",\"enabled\":"
+  if j.enabled == 1 { s = s + "true" } else { s = s + "false" }
+  s = s + ",\"runs\":" + str(j.runs) + ",\"last_status\":" + jsonQuote(j.last_status) + ",\"last_error\":" + jsonQuote(j.last_error) + ",\"last_run_at\":"
+  if j.last_run_at == 0 { s = s + "\"\"" } else { s = s + jsonQuote(time_format_utc(j.last_run_at, "%Y-%m-%dT%H:%M:%SZ")) }
+  s = s + ",\"created_at\":" + jsonQuote(j.created_at) + ",\"updated_at\":" + jsonQuote(j.updated_at) + "}"
+}
+
+func jobColumns() (s) { s = "SELECT name, schedule, script, input, enabled, last_run_at, last_status, last_error, runs, created_at, updated_at FROM cron_jobs" }
+
+func createJob(db, name, schedule, script, input) (out, err) {
+  out = ""
+  err = ""
+  if !validSegment(name) { err = "job name must be lowercase and start with a letter"  return }
+  if !validSchedule(schedule) { err = "schedule must be five cron fields or @every <duration>"  return }
+  if script == "" { err = "a job must name a script"  return }
+  if input == "" { input = "{}" }
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO cron_jobs (name, schedule, script, input, enabled, created_at, updated_at) VALUES (?,?,?,?,1,?,?) ON CONFLICT(name) DO UPDATE SET schedule = excluded.schedule, script = excluded.script, input = excluded.input, updated_at = excluded.updated_at", []string{name, schedule, script, input, stamp, stamp})
+  j, _ := findJob(db, name)
+  out = jobJSON(j)
+}
+
+func findJob(db, name) (j, found) {
+  j = JobRow{name: "", schedule: "", script: "", input: "{}", enabled: 0, last_run_at: 0, last_status: "", last_error: "", runs: 0, created_at: "", updated_at: ""}
+  found = false
+  rows := sqlite_query(db, jobColumns() + " WHERE name = ?", []string{name})
+  if rows == "[]" { return }
+  parsed := parse(rows, []JobRow{})
+  if len(parsed) == 0 { return }
+  j = parsed[0]
+  found = true
+}
+
+func listJobs(db) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, jobColumns() + " ORDER BY name")
+  if rows == "[]" { return }
+  parsed := parse(rows, []JobRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, jobJSON(parsed[i]))
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+func deleteJob(db, name) (err) {
+  err = ""
+  _, found := findJob(db, name)
+  if !found { err = "job not found"  return }
+  sqlite_exec(db, "DELETE FROM cron_jobs WHERE name = ?", []string{name})
+}
+
+func setJobEnabled(db, name, on) (err) {
+  err = ""
+  _, found := findJob(db, name)
+  if !found { err = "job not found"  return }
+  v := "0"
+  if on { v = "1" }
+  // Deliberately not routed through update: disabling a job whose schedule no
+  // longer parses must still work, or a broken job can never be switched off.
+  sqlite_exec(db, "UPDATE cron_jobs SET enabled = CAST(? AS INTEGER), updated_at = ? WHERE name = ?", []string{v, nowStamp(), name})
+}
+
+// runJob executes one job and records the outcome in the same transaction of
+// thought as the event it emits: the job row is the current state, the event
+// is the history.
+func runJob(db, name) (out, err) {
+  out = ""
+  err = ""
+  j, found := findJob(db, name)
+  if !found { err = "job not found"  return }
+
+  started := now()
+  value, runErr := runScript(db, j.script, j.input)
+  status := "ok"
+  if runErr != "" { status = "error" }
+  took := now() - started
+
+  sqlite_exec(db, "UPDATE cron_jobs SET last_run_at = CAST(? AS INTEGER), last_status = ?, last_error = ?, runs = runs + 1, updated_at = ? WHERE name = ?", []string{str(started), status, runErr, nowStamp(), name})
+
+  data := "{\"job\":" + jsonQuote(name) + ",\"script\":" + jsonQuote(j.script) + ",\"took_s\":" + str(took) + "}"
+  level := "info"
+  kind := "cron.ok"
+  if status == "error" {
+    level = "error"
+    kind = "cron.error"
+    data = "{\"job\":" + jsonQuote(name) + ",\"script\":" + jsonQuote(j.script) + ",\"error\":" + jsonQuote(runErr) + "}"
+  }
+  _, _ = emitEvent(db, "cron", kind, level, "cron", name, data)
+
+  if value == "" { value = "null" }
+  out = "{\"status\":" + jsonQuote(status) + ",\"took_s\":" + str(took) + ",\"error\":" + jsonQuote(runErr) + ",\"value\":" + value + "}"
+}
+
+// tickCron runs every job that is due. Returns how many fired, so a manual
+// `cron tick` can report something and the scheduler can stay silent.
+func tickCron(db) (fired) {
+  fired = 0
+  ts := now()
+  rows := sqlite_query(db, jobColumns() + " WHERE enabled = 1")
+  if rows == "[]" { return }
+  parsed := parse(rows, []JobRow{})
+  i := 0
+  while i < len(parsed) {
+    j := parsed[i]
+    if dueNow(j.schedule, j.last_run_at, ts) {
+      _, _ = runJob(db, j.name)
+      fired = fired + 1
+    }
+    i = i + 1
+  }
+}
+
+func schedulerLoop(db) {
+  for {
+    sleep(1)
+    tickCron(db)
+  }
+}

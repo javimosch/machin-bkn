@@ -1,0 +1,186 @@
+// events — an append-only log with a bounded query surface.
+//
+// The bound is the point. A stats grouping is a column name interpolated into
+// SQL, so `by` is checked against a fixed list rather than escaped: the only
+// safe way to accept an identifier from a caller is not to accept one.
+
+func eventsSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, stream TEXT NOT NULL, type TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', source TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}', ts INTEGER NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS events_stream_ts ON events(stream, ts DESC); CREATE INDEX IF NOT EXISTS events_stream_type ON events(stream, type);"
+}
+
+func eventLevels() (s) { s = "debug, info, warn, error, fatal" }
+
+func validLevel(l) (ok) {
+  ok = false
+  if l == "debug" { ok = true }
+  if l == "info" { ok = true }
+  if l == "warn" { ok = true }
+  if l == "error" { ok = true }
+  if l == "fatal" { ok = true }
+}
+
+// groupable is the allow-list that keeps `by` out of SQL injection range.
+func groupable(field) (ok) {
+  ok = false
+  if field == "type" { ok = true }
+  if field == "level" { ok = true }
+  if field == "source" { ok = true }
+  if field == "subject" { ok = true }
+}
+
+// parseAge turns "30s" / "5m" / "1h" / "7d" / "2w" into seconds. A bare
+// number is seconds. Returns -1 when the shape is wrong, so a typo becomes an
+// error rather than silently meaning "all of time".
+func parseAge(a) (secs) {
+  secs = -1
+  if a == "" { return }
+  unit := substr(a, len(a) - 1, len(a))
+  head := substr(a, 0, len(a) - 1)
+  mult := 0
+  if unit == "s" { mult = 1 }
+  if unit == "m" { mult = 60 }
+  if unit == "h" { mult = 3600 }
+  if unit == "d" { mult = 86400 }
+  if unit == "w" { mult = 604800 }
+  if mult == 0 {
+    if !looksNumeric(a) { return }
+    secs = int(parse(a, 0))
+    return
+  }
+  if !looksNumeric(head) { return }
+  secs = int(parse(head, 0)) * mult
+}
+
+type EventRow struct { id string  stream string  kind string  level string  source string  subject string  data string  ts int  created_at string }
+
+func eventJSON(e) (s) {
+  s = "{\"id\":" + jsonQuote(e.id) + ",\"stream\":" + jsonQuote(e.stream) + ",\"type\":" + jsonQuote(e.kind) + ",\"level\":" + jsonQuote(e.level) + ",\"source\":" + jsonQuote(e.source) + ",\"subject\":" + jsonQuote(e.subject) + ",\"data\":" + e.data + ",\"created_at\":" + jsonQuote(e.created_at) + "}"
+}
+
+func emitEvent(db, stream, kind, level, source, subject, data) (out, err) {
+  out = ""
+  err = ""
+  if !validSegment(stream) { err = "stream must be lowercase and start with a letter"  return }
+  if kind == "" { err = "type is required"  return }
+  if level == "" { level = "info" }
+  if !validLevel(level) { err = "level must be one of: " + eventLevels()  return }
+  if data == "" { data = "{}" }
+  if sqlite_query(db, "SELECT json_valid(?) AS v WHERE json_valid(?) = 1", []string{data, data}) == "[]" {
+    err = "data is not valid JSON"
+    return
+  }
+  id := newID()
+  ts := now()
+  stamp := time_format_utc(ts, "%Y-%m-%dT%H:%M:%SZ")
+  sqlite_exec(db, "INSERT INTO events (id, stream, type, level, source, subject, data, ts, created_at) VALUES (?,?,?,?,?,?,?,CAST(? AS INTEGER),?)", []string{id, stream, kind, level, source, subject, data, str(ts), stamp})
+  out = eventJSON(EventRow{id: id, stream: stream, kind: kind, level: level, source: source, subject: subject, data: data, ts: ts, created_at: stamp})
+}
+
+// eventWhere builds the filter clause shared by list and stats. Every value
+// is bound; only the fixed column names are interpolated.
+func eventWhere(stream, kind, level, source, subject, since, until) (sql, binds, err) {
+  sql = " WHERE stream = ?"
+  binds = []string{stream}
+  err = ""
+  if kind != "" { sql = sql + " AND type = ?"  binds = append(binds, kind) }
+  if level != "" { sql = sql + " AND level = ?"  binds = append(binds, level) }
+  if source != "" { sql = sql + " AND source = ?"  binds = append(binds, source) }
+  if subject != "" { sql = sql + " AND subject = ?"  binds = append(binds, subject) }
+  if since != "" {
+    secs := parseAge(since)
+    if secs < 0 { err = "since must be a duration like 30s, 5m, 1h, 7d"  return }
+    sql = sql + " AND ts >= CAST(? AS INTEGER)"
+    binds = append(binds, str(now() - secs))
+  }
+  if until != "" {
+    secs := parseAge(until)
+    if secs < 0 { err = "until must be a duration like 30s, 5m, 1h, 7d"  return }
+    sql = sql + " AND ts <= CAST(? AS INTEGER)"
+    binds = append(binds, str(now() - secs))
+  }
+}
+
+func listEvents(db, stream, kind, level, source, subject, since, until, limit, offset) (out, count, err) {
+  out = "[]"
+  count = 0
+  where, binds, err := eventWhere(stream, kind, level, source, subject, since, until)
+  if err != "" { return }
+  binds = append(binds, str(limit))
+  binds = append(binds, str(offset))
+  rows := sqlite_query(db, "SELECT id, stream, type AS kind, level, source, subject, data, ts, created_at FROM events" + where + " ORDER BY ts DESC, id DESC LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)", binds)
+  if rows == "[]" { return }
+  parsed := parse(rows, []EventRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, eventJSON(parsed[i]))
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+type GroupRow struct { k string  n int }
+
+func eventStats(db, stream, by, since) (out, total, err) {
+  out = "[]"
+  total = 0
+  err = ""
+  if by == "" { by = "type" }
+  if !groupable(by) { err = "by must be one of: type, level, source, subject"  return }
+  where, binds, werr := eventWhere(stream, "", "", "", "", since, "")
+  if werr != "" { err = werr  return }
+  rows := sqlite_query(db, "SELECT " + by + " AS k, COUNT(*) AS n FROM events" + where + " GROUP BY " + by + " ORDER BY n DESC", binds)
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    g := parsed[i]
+    parts = append(parts, "{\"key\":" + jsonQuote(g.k) + ",\"count\":" + str(g.n) + "}")
+    total = total + g.n
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}
+
+type StreamRow struct { stream string  n int  last_at string }
+
+func listStreams(db) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, "SELECT stream, COUNT(*) AS n, MAX(created_at) AS last_at FROM events GROUP BY stream ORDER BY stream")
+  if rows == "[]" { return }
+  parsed := parse(rows, []StreamRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    s := parsed[i]
+    parts = append(parts, "{\"stream\":" + jsonQuote(s.stream) + ",\"count\":" + str(s.n) + ",\"last_at\":" + jsonQuote(s.last_at) + "}")
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+func pruneEvents(db, olderThan, stream) (removed, err) {
+  removed = 0
+  err = ""
+  secs := parseAge(olderThan)
+  if secs < 0 { err = "older-than must be a duration like 30s, 5m, 1h, 7d"  return }
+  cutoff := str(now() - secs)
+  binds := []string{cutoff}
+  sql := "DELETE FROM events WHERE ts < CAST(? AS INTEGER)"
+  countSQL := "SELECT COUNT(*) AS n FROM events WHERE ts < CAST(? AS INTEGER)"
+  if stream != "" {
+    sql = sql + " AND stream = ?"
+    countSQL = countSQL + " AND stream = ?"
+    binds = append(binds, stream)
+  }
+  rows := sqlite_query(db, countSQL, binds)
+  if rows != "[]" {
+    parsed := parse(rows, []GroupRow{})
+    if len(parsed) > 0 { removed = parsed[0].n }
+  }
+  sqlite_exec(db, sql, binds)
+}

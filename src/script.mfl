@@ -1,0 +1,112 @@
+// script — the registry and run history.
+//
+// A script is JS source stored in the database, run in a sandbox with a fixed
+// host surface. This file owns everything *except* the evaluator: the
+// registry, the run history, and the single seam `runScript`, which is the
+// only place a JS engine is reached for. Cron and the HTTP routes both go
+// through that seam, so the sandbox phase replaces one function body and
+// nothing else.
+
+func scriptSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS scripts (name TEXT PRIMARY KEY, source TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 5000, allow_net TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS script_runs (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, took_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', logs TEXT NOT NULL DEFAULT '[]', value TEXT NOT NULL DEFAULT 'null', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS script_runs_name ON script_runs(name, created_at DESC);"
+}
+
+// The host objects a script sees. Kept as one sorted, comma-joined string
+// because it is contract: a script that probes for a capability must get the
+// same answer from every build.
+func sandboxSurface() (s) { s = "auth,crypto,events,files,http,id,kv,lock,log,now,store" }
+
+type ScriptRow struct { name string  source string  description string  timeout_ms int  allow_net string  enabled int  created_at string  updated_at string }
+
+func scriptJSON(s) (out) {
+  out = "{\"name\":" + jsonQuote(s.name) + ",\"description\":" + jsonQuote(s.description) + ",\"timeout_ms\":" + str(s.timeout_ms) + ",\"allow_net\":" + typeListJSON(s.allow_net) + ",\"enabled\":"
+  if s.enabled == 1 { out = out + "true" } else { out = out + "false" }
+  out = out + ",\"bytes\":" + str(len(s.source)) + ",\"created_at\":" + jsonQuote(s.created_at) + ",\"updated_at\":" + jsonQuote(s.updated_at) + "}"
+}
+
+func scriptColumns() (s) { s = "SELECT name, source, description, timeout_ms, allow_net, enabled, created_at, updated_at FROM scripts" }
+
+func createScript(db, name, source, description, timeoutMs, allowNet) (out, err) {
+  out = ""
+  err = ""
+  if !validSegment(name) { err = "script name must be lowercase and start with a letter"  return }
+  if source == "" { err = "script source is empty"  return }
+  if timeoutMs <= 0 { timeoutMs = 5000 }
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO scripts (name, source, description, timeout_ms, allow_net, enabled, created_at, updated_at) VALUES (?,?,?,CAST(? AS INTEGER),?,1,?,?) ON CONFLICT(name) DO UPDATE SET source = excluded.source, description = excluded.description, timeout_ms = excluded.timeout_ms, allow_net = excluded.allow_net, updated_at = excluded.updated_at", []string{name, source, description, str(timeoutMs), allowNet, stamp, stamp})
+  s, _ := findScript(db, name)
+  out = scriptJSON(s)
+}
+
+func findScript(db, name) (s, found) {
+  s = ScriptRow{name: "", source: "", description: "", timeout_ms: 0, allow_net: "", enabled: 0, created_at: "", updated_at: ""}
+  found = false
+  rows := sqlite_query(db, scriptColumns() + " WHERE name = ?", []string{name})
+  if rows == "[]" { return }
+  parsed := parse(rows, []ScriptRow{})
+  if len(parsed) == 0 { return }
+  s = parsed[0]
+  found = true
+}
+
+func listScripts(db) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, scriptColumns() + " ORDER BY name")
+  if rows == "[]" { return }
+  parsed := parse(rows, []ScriptRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, scriptJSON(parsed[i]))
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+func deleteScript(db, name) (err) {
+  err = ""
+  _, found := findScript(db, name)
+  if !found { err = "script not found"  return }
+  sqlite_exec(db, "DELETE FROM scripts WHERE name = ?", []string{name})
+}
+
+func recordRun(db, name, status, tookMs, runErr, logs, value) (id) {
+  id = newID()
+  if logs == "" { logs = "[]" }
+  if value == "" { value = "null" }
+  sqlite_exec(db, "INSERT INTO script_runs (id, name, status, took_ms, error, logs, value, created_at) VALUES (?,?,?,CAST(? AS INTEGER),?,?,?,?)", []string{id, name, status, str(tookMs), runErr, logs, value, nowStamp()})
+}
+
+type RunRow struct { id string  name string  status string  took_ms int  error string  logs string  value string  created_at string }
+
+func listRuns(db, name, limit) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, "SELECT id, name, status, took_ms, error, logs, value, created_at FROM script_runs WHERE name = ? ORDER BY created_at DESC, id DESC LIMIT CAST(? AS INTEGER)", []string{name, str(limit)})
+  if rows == "[]" { return }
+  parsed := parse(rows, []RunRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    r := parsed[i]
+    parts = append(parts, "{\"id\":" + jsonQuote(r.id) + ",\"status\":" + jsonQuote(r.status) + ",\"took_ms\":" + str(r.took_ms) + ",\"error\":" + jsonQuote(r.error) + ",\"logs\":" + r.logs + ",\"value\":" + r.value + ",\"created_at\":" + jsonQuote(r.created_at) + "}")
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+// runScript is the seam. Everything around it — registry, history, cron, the
+// HTTP routes — is finished and exercised; only the evaluator is missing, and
+// it reports that rather than pretending to have run.
+func runScript(db, name, input) (value, err) {
+  value = "null"
+  err = ""
+  s, found := findScript(db, name)
+  if !found { err = "script not found"  return }
+  if s.enabled != 1 { err = "script is disabled"  return }
+  err = "script runtime is not available in this build"
+  recordRun(db, name, "error", 0, err, "[]", "null")
+}

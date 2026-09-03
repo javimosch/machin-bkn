@@ -2,6 +2,7 @@
 var gDB = 0
 var gAdmin = ""
 var gHost = "127.0.0.1"
+var gScheduler = 0
 
 func storeRoutes(req, q, segs) (res, handled) {
   handled = true
@@ -149,6 +150,106 @@ func authRoutes(req, q, segs) (res) {
     return
   }
   res = errRes("404 Not Found", "not_found", "no such route")
+}
+
+func eventsRoutes(req, q, segs) (res) {
+  if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
+
+  if len(segs) == 2 {
+    streams, count := listStreams(gDB)
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"streams\":" + streams + "}")
+    return
+  }
+
+  stream := segs[2]
+
+  if len(segs) == 4 {
+    if segs[3] == "stats" {
+      groups, total, err := eventStats(gDB, stream, qGet(q, "by"), qGet(q, "since"))
+      if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
+      res = jsonRes("200 OK", "{\"ok\":true,\"total\":" + str(total) + ",\"groups\":" + groups + "}")
+      return
+    }
+    res = errRes("404 Not Found", "not_found", "no such route")
+    return
+  }
+
+  if req.method == "POST" {
+    out, err := emitEvent(gDB, stream, jsonField(req.body, ".type"), jsonField(req.body, ".level"), jsonField(req.body, ".source"), jsonField(req.body, ".subject"), jsonField(req.body, ".data"))
+    if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
+    res = jsonRes("201 Created", "{\"ok\":true,\"event\":" + out + "}")
+    return
+  }
+
+  events, count, err := listEvents(gDB, stream, qGet(q, "type"), qGet(q, "level"), qGet(q, "source"), qGet(q, "subject"), qGet(q, "since"), qGet(q, "until"), qInt(q, "limit", 50), qInt(q, "offset", 0))
+  if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
+  res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"events\":" + events + "}")
+}
+
+func cronRoutes(req, q, segs) (res) {
+  if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
+
+  if len(segs) == 2 {
+    jobs, count := listJobs(gDB)
+    running := "false"
+    if gScheduler == 1 { running = "true" }
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"scheduler_running\":" + running + ",\"jobs\":" + jobs + "}")
+    return
+  }
+
+  name := segs[2]
+
+  if len(segs) == 4 {
+    if segs[3] == "run" {
+      out, err := runJob(gDB, name)
+      if err != "" { res = errRes("404 Not Found", "not_found", err)  return }
+      res = jsonRes("200 OK", "{\"ok\":true,\"result\":" + out + "}")
+      return
+    }
+    res = errRes("404 Not Found", "not_found", "no such route")
+    return
+  }
+
+  j, found := findJob(gDB, name)
+  if !found { res = errRes("404 Not Found", "not_found", "job not found")  return }
+  res = jsonRes("200 OK", "{\"ok\":true,\"job\":" + jobJSON(j) + "}")
+}
+
+func scriptRoutes(req, q, segs) (res) {
+  if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
+
+  if len(segs) == 2 {
+    scripts, count := listScripts(gDB)
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"scripts\":" + scripts + "}")
+    return
+  }
+
+  name := segs[2]
+
+  if len(segs) == 4 {
+    if segs[3] == "run" {
+      started := now_ms()
+      value, err := runScript(gDB, name, req.body)
+      took := now_ms() - started
+      if err != "" {
+        res = jsonRes("200 OK", "{\"ok\":false,\"status\":\"error\",\"took_ms\":" + str(took) + ",\"error\":" + jsonQuote(err) + ",\"value\":null}")
+        return
+      }
+      res = jsonRes("200 OK", "{\"ok\":true,\"status\":\"ok\",\"took_ms\":" + str(took) + ",\"value\":" + value + "}")
+      return
+    }
+    if segs[3] == "runs" {
+      runs, count := listRuns(gDB, name, qInt(q, "limit", 20))
+      res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"runs\":" + runs + "}")
+      return
+    }
+    res = errRes("404 Not Found", "not_found", "no such route")
+    return
+  }
+
+  s, found := findScript(gDB, name)
+  if !found { res = errRes("404 Not Found", "not_found", "script not found")  return }
+  res = jsonRes("200 OK", "{\"ok\":true,\"script\":" + scriptJSON(s) + "}")
 }
 
 func filesRoutes(req, q, segs) (res) {
@@ -311,6 +412,18 @@ func handle(req) (res) {
 
   if len(segs) >= 2 {
     if segs[0] == "v1" {
+      if segs[1] == "events" {
+        res = eventsRoutes(req, q, segs)
+        return
+      }
+      if segs[1] == "cron" {
+        res = cronRoutes(req, q, segs)
+        return
+      }
+      if segs[1] == "script" {
+        res = scriptRoutes(req, q, segs)
+        return
+      }
       if segs[1] == "files" {
         res = filesRoutes(req, q, segs)
         return
@@ -358,6 +471,11 @@ func main() {
 
   gDB = storeOpen(path)
   if gDB == 0 { println("cannot open " + path)  return }
+  // The scheduler is part of the server, not a separate process: a job that
+  // only fires when someone remembers to run a ticker is not a schedule.
+  gScheduler = 1
+  go schedulerLoop(gDB)
+
   println("[serve] listening on http://" + gHost + ":" + str(port))
   serve(port, func(req) { return handle(req) })
 }

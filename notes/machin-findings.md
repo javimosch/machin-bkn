@@ -169,3 +169,30 @@ compiler with generated-code line numbers, not from the MFL frontend that
 already had the type information to reject it — the one place where MFL's
 "compile through C" leaks. Either the checker should reject slicing a string
 or codegen should lower it to `substr`.
+
+## 12. `machin check` only typechecks what is reachable from `main`
+
+A function nothing calls is not checked at all — including calls to functions
+that do not exist.
+
+```
+func never_called(x) (out) {
+  a, b := totally_undefined(x)
+  out = str(a) + b
+}
+func main() { println("hi") }
+```
+
+`machin check` → `ok — no errors`. Make `main` call `never_called` and the
+same file fails with `[undefined-name] ... totally_undefined`.
+
+This bit while building cron: `src/cron.mfl` called `runScript`, which had not
+been written yet, and the whole tree checked clean because nothing had wired
+the routes up to it. A library file appears correct right up until the moment
+something uses it, which is the opposite of what a checker is for — the value
+of checking a library is precisely that you have not written its caller yet.
+
+Note the reachability rule is deliberate elsewhere (the wasm target treats
+`export func` as a root, so a module needs no `main`). The gap is that there
+is no way to ask for a whole-program check of a library: `--all` or treating
+every top-level func as a root under `check` would close it.

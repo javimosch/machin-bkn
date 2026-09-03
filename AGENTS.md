@@ -112,8 +112,17 @@ point of doing it in machin.
 | kv | 7 | pass |
 | auth | 14 | pass |
 | files | 12 | pass |
+| runtime | 14 | 10 pass, 4 blocked on the script sandbox |
 
-49 of 113.
+59 of 113.
+
+The four blocked assertions (`cron run over HTTP`, `scheduler fired it`,
+`script run + value`, `sandbox surface`) all fail for one reason: `runScript`
+in `src/script.mfl` has no evaluator. Everything around it — the registry, run
+history, the scheduler, event emission, the HTTP routes — is finished and
+exercised: the scheduler fires `dogtick` on time and records `cron.error`
+events with the runtime's own explanation. The sandbox phase replaces one
+function body.
 
 ## Gate runbook (auth needs CLI setup before the server starts)
 
@@ -126,6 +135,8 @@ mbkn auth member add dogcorp ada@dog.io --role owner
 mbkn auth member add dogcorp bob@dog.io --role member
 mbkn files ns create dogpub --allow-type image/png --public
 mbkn files ns create dogpriv --allow-type text/html
+mbkn script create dogjob --file dogjob.js --description "dogfood probe"
+mbkn cron create dogtick --schedule '@every 3s' --script dogjob
 BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
 ```
 
