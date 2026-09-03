@@ -331,12 +331,28 @@ suite before a benchmark killed the process at concurrency 2 on a public route.
 
 Filed as [machin#647](https://github.com/javimosch/machin/issues/647).
 
-The deeper half, noted there but not filed separately: a global assigned an
-arena-allocated value from inside a handler is a dangling pointer once that
-request's goroutine ends, because machin frees the goroutine's arena. That is
-the same class as [#310](https://github.com/javimosch/machin/issues/310), fixed
-by deep-copying `go` arguments at the arena boundary; assignment to a global
-looks like the untreated sibling.
+## 17. A global assigned arena memory inside a goroutine dangles when it ends
+
+The root cause of the crash, and the more serious of the two. A global holding
+an arena-allocated value -- a slice, or any string built at runtime -- points
+into the arena of the goroutine that assigned it. `mfl_go_run_*` calls
+`mfl_arena_free` when that goroutine ends, so every later read is a
+use-after-free.
+
+Eleven lines outside machweb are enough, with no concurrency at all: `go` a
+function that assigns a global slice, `sleep`, then read it. Without ASan it
+usually prints the right answer, because the freed chunk has not been reused
+yet -- which is exactly why it ships.
+
+The `--race-safe` warning on that variant points the wrong way: the fix a race
+report suggests is synchronization, and a correctly ordered channel handshake
+still leaves the read on freed memory. It is a lifetime bug, not a race.
+
+Same class as [#310](https://github.com/javimosch/machin/issues/310) (the
+hazard via `go f(args...)`, fixed by deep-copying at the arena boundary); the
+global-assignment boundary is the untreated half.
+
+Filed as [machin#648](https://github.com/javimosch/machin/issues/648).
 
 **The rule to carry forward when writing MFL:** a global holding
 arena-allocated memory (`var x = []int{}`, a string built at runtime, a
