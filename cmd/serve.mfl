@@ -235,6 +235,24 @@ func hooksRoutes(req, q, segs) (res) {
     if index(ctype, "json") < 0 { r = response(status, ctype, jsonUnquote(body)) }
   }
   if originAllowed(h.allow_origin, origin) { r = with_header(r, "Access-Control-Allow-Origin", origin) }
+
+  // A script that returns headers gets them verbatim. Caching, a redirect's
+  // Location and a conditional GET's ETag are all decisions the handler owns:
+  // the core cannot know a bundle's identity or a rule's target.
+  hdrs, hdrErr := json_get(value, ".headers")
+  if hdrErr == "" {
+    rows := sqlite_query(gDB, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{hdrs})
+    if rows != "[]" {
+      parsed := parse(rows, []GroupRow{})
+      i := 0
+      while i < len(parsed) {
+        name := parsed[i].k
+        v, e := json_get(hdrs, "." + name)
+        if e == "" { r = with_header(r, name, jsonUnquote(v)) }
+        i = i + 1
+      }
+    }
+  }
   res = r
 }
 
@@ -250,6 +268,12 @@ func queryJSON(q) (out) {
 
 func statusLine(code) (s) {
   s = "200 OK"
+  if code == "301" { s = "301 Moved Permanently" }
+  if code == "302" { s = "302 Found" }
+  if code == "303" { s = "303 See Other" }
+  if code == "304" { s = "304 Not Modified" }
+  if code == "308" { s = "308 Permanent Redirect" }
+  if code == "410" { s = "410 Gone" }
   if code == "201" { s = "201 Created" }
   if code == "202" { s = "202 Accepted" }
   if code == "204" { s = "204 No Content" }

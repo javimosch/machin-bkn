@@ -63,7 +63,8 @@ func createNs(db, name, backend, maxBytes, allowTypes, public) (out, err) {
   pub := "0"
   if public { pub = "1" }
   sqlite_exec(db, "INSERT INTO file_ns (name, backend, max_bytes, allow_types, public, created_at) VALUES (?,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),?) ON CONFLICT(name) DO UPDATE SET backend = excluded.backend, max_bytes = excluded.max_bytes, allow_types = excluded.allow_types, public = excluded.public", []string{name, backend, str(maxBytes), allowTypes, pub, nowStamp()})
-  n, _ := findNs(db, name)
+  n, stored := findNs(db, name)
+  if !stored { err = "the namespace was not stored (the database may be locked by another process)"  return }
   out = nsJSON(n)
 }
 

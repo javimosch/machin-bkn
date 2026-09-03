@@ -114,7 +114,8 @@ func createJob(db, name, schedule, script, input) (out, err) {
   if input == "" { input = "{}" }
   stamp := nowStamp()
   sqlite_exec(db, "INSERT INTO cron_jobs (name, schedule, script, input, enabled, created_at, updated_at) VALUES (?,?,?,?,1,?,?) ON CONFLICT(name) DO UPDATE SET schedule = excluded.schedule, script = excluded.script, input = excluded.input, updated_at = excluded.updated_at", []string{name, schedule, script, input, stamp, stamp})
-  j, _ := findJob(db, name)
+  j, stored := findJob(db, name)
+  if !stored { err = "the job was not stored (the database may be locked by another process)"  return }
   out = jobJSON(j)
 }
 

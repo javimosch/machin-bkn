@@ -1,0 +1,8 @@
+{
+  "locale": "fr",
+  "fallback": "en",
+  "entries": {
+    "nav.home": "Accueil",
+    "cta.signup": "S'inscrire"
+  }
+}

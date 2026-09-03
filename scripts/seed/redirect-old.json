@@ -1,0 +1,1 @@
+{ "match": "exact", "from": "/dog-old", "to": "/dog-new", "status": 301 }

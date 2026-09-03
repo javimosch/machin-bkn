@@ -1,0 +1,11 @@
+{
+  "slug": "dog-pricing",
+  "ttl": 120,
+  "data": {
+    "currency": "EUR",
+    "plans": [
+      { "name": "pro", "price": 29 },
+      { "name": "team", "price": 99 }
+    ]
+  }
+}

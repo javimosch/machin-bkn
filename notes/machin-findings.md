@@ -273,3 +273,37 @@ decoder in `src/http.mfl` uses a literal printable-ASCII table instead,
 because it only ever needs codes 32..126. `from_hex` is the general answer and
 the table should probably go. Note `bytes_str` stops at a NUL, so this cannot
 produce a zero byte.
+
+## 15. `sqlite_exec` reports nothing, so a busy write is silently lost
+
+MFL's `sqlite_exec` returns no error. Under write-lock contention SQLite
+answers SQLITE_BUSY immediately (the default `busy_timeout` is 0), and the
+statement simply does not happen — with no signal of any kind.
+
+Reproduction: hold a write transaction from another process, then create a
+record through the CLI.
+
+```
+$ sqlite3 app.db "BEGIN IMMEDIATE; SELECT 1;" &   # holds the write lock
+$ mbkn script create redirects --file redirects.js
+{"ok":true,"script":{"name":"","description":"","timeout_ms":0,...}}
+```
+
+`ok: true`, and an empty record: the INSERT was dropped and the read-back
+found nothing. This is how it first appeared — a server from an earlier phase
+was still running against the same database file, one setup command out of
+four vanished, and five assertions went red pointing at the redirect logic,
+which was fine.
+
+Two fixes, both applied here:
+
+- `PRAGMA busy_timeout = 5000` (and WAL) at open, so a second writer waits
+  instead of failing. A server plus a CLI command on the same file is the
+  normal case, not the odd one.
+- Every create path now checks its read-back and returns an error when the
+  row is not there, instead of serializing whatever the empty struct held.
+
+The underlying gap is the same one as finding 12's: MFL is willing to carry
+on quietly. `sqlite_exec` should return a status, the way `sqlite_query`
+returns a value — see also the standing ask that `sqlite_query` return
+`(rows, err)`.

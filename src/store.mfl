@@ -13,6 +13,10 @@ func storeSchema() (s) {
 func storeOpen(path) (db) {
   db = sqlite_open(path)
   if db == 0 { return }
+  // Without this, a second writer gets SQLITE_BUSY immediately — and
+  // sqlite_exec reports no error, so the write is simply lost. The server and
+  // a CLI command touching the same file is the normal case, not the odd one.
+  sqlite_exec(db, "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;")
   sqlite_exec(db, storeSchema())
   sqlite_exec(db, kvSchema())
   sqlite_exec(db, authSchema())

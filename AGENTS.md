@@ -115,8 +115,9 @@ point of doing it in machin.
 | runtime | 14 | pass |
 | stripe | 10 | pass |
 | forms | 11 | pass |
+| cms | 15 | pass |
 
-84 of 113.
+99 of 113.
 
 ## The script sandbox
 
@@ -167,8 +168,25 @@ mbkn script create forms --file scripts/forms.js
 mbkn script create waitlist-export --file scripts/waitlist-export.js
 mbkn hooks create forms --script forms --allow-origin https://dog.example --rate-limit 60
 mbkn hooks create exports --script waitlist-export --rate-limit 30
+for f in en fr; do mbkn store put i18n/bundles --id $f --data @scripts/seed/i18n-$f.json; done
+mbkn store put redirects/rules --id dog-old --data @scripts/seed/redirect-old.json
+mbkn store put redirects/rules --id dogdocs --data @scripts/seed/redirect-docs.json
+mbkn store put flags/definitions --id dog-public   --data @scripts/seed/flag-public.json
+mbkn store put flags/definitions --id dog-rollout  --data @scripts/seed/flag-rollout.json
+mbkn store put flags/definitions --id dog-internal --data @scripts/seed/flag-internal.json
+mbkn store put configs/documents --id dog-pricing --data @scripts/seed/config-pricing.json
+mbkn store put configs/aliases   --id dogprice    --data @scripts/seed/config-alias.json
+for n in i18n redirects flags configs; do
+  mbkn script create $n --file scripts/$n.js
+  mbkn hooks create $n --script $n --rate-limit 120
+done
 BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
 ```
+
+Never send setup output to /dev/null. A `script create` that silently failed
+under database contention cost five confusing red assertions in the cms phase
+before the cause was obvious — the CLI had printed the problem and the
+redirect was to /dev/null. Read what setup says.
 
 Killing a stale server: `pgrep -x mbkn | xargs -r kill`. Do **not** match on
 the command line from the agent's own shell — neither `pkill -f <pattern>` nor

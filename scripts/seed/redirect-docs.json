@@ -1,0 +1,1 @@
+{ "match": "prefix", "from": "/dogdocs", "to": "https://docs.example.com", "status": 301 }

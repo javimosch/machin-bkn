@@ -31,7 +31,8 @@ func createHook(db, name, script, maxBytes, allowOrigin, rateLimit) (out, err) {
   if script == "" { err = "a hook must name a script"  return }
   stamp := nowStamp()
   sqlite_exec(db, "INSERT INTO hooks (name, script, max_bytes, allow_origin, rate_limit, enabled, created_at, updated_at) VALUES (?,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),1,?,?) ON CONFLICT(name) DO UPDATE SET script = excluded.script, max_bytes = excluded.max_bytes, allow_origin = excluded.allow_origin, rate_limit = excluded.rate_limit, updated_at = excluded.updated_at", []string{name, script, str(maxBytes), allowOrigin, str(rateLimit), stamp, stamp})
-  h, _ := findHook(db, name)
+  h, stored := findHook(db, name)
+  if !stored { err = "the hook was not stored (the database may be locked by another process)"  return }
   out = hookJSON(h)
 }
 

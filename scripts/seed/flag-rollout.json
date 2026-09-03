@@ -1,0 +1,1 @@
+{ "description": "Half the traffic", "public": true, "enabled": true, "rollout": 50 }

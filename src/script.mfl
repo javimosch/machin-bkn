@@ -34,7 +34,8 @@ func createScript(db, name, source, description, timeoutMs, allowNet) (out, err)
   if timeoutMs <= 0 { timeoutMs = 5000 }
   stamp := nowStamp()
   sqlite_exec(db, "INSERT INTO scripts (name, source, description, timeout_ms, allow_net, enabled, created_at, updated_at) VALUES (?,?,?,CAST(? AS INTEGER),?,1,?,?) ON CONFLICT(name) DO UPDATE SET source = excluded.source, description = excluded.description, timeout_ms = excluded.timeout_ms, allow_net = excluded.allow_net, updated_at = excluded.updated_at", []string{name, source, description, str(timeoutMs), allowNet, stamp, stamp})
-  s, _ := findScript(db, name)
+  s, stored := findScript(db, name)
+  if !stored { err = "the script was not stored (the database may be locked by another process)"  return }
   out = scriptJSON(s)
 }
 
