@@ -263,21 +263,74 @@ which is public and unauthenticated by design -- two concurrent callers take the
 process down. The Go build served the same load across all five repetitions
 without a single error.
 
-What is ruled out: the JSRuntime is created and freed per call
-(`vendor/bkn_qjs.c:157,216`), so it is not a shared-interpreter problem; and
-kv/store at concurrency 8 sustained ~10k rps for 25s on the same SQLite handle
-with zero errors, so the datastore handle is not it either. What is confirmed is
-the milder sibling symptom: `src/script.mfl:415-423` binds the run context in
-process globals (`gScriptDB`, `gScriptName`, `gScriptNet`) and zeroes them on
-exit, so overlapping runs clobber each other and produce
-`Error: no datastore bound to this run` -- the 500s seen at concurrency 8. The
-globals exist because the FFI boundary passes only two strings (`op`, `argsJSON`)
-with nowhere to put a per-run handle. The crash itself still needs a stack trace
-from an unstripped build to pin down.
+Root cause, from an AddressSanitizer build (`BKN_STATIC=0 BKN_STRIP=0
+CC=<cc wrapper adding -fsanitize=address> ./build.sh`):
+
+```
+ERROR: AddressSanitizer: heap-use-after-free
+READ of size 8 ... thread T5
+    #0 mfl_ulidBumpRandom_0
+    #1 mfl_newID_0
+    #2 mfl_recordRun_0        <- every hook run records a run row
+freed by thread T2 here:
+    #1 mfl_arena_free
+    #2 mfl_go_run_1           <- T2's request ended, its arena went with it
+previously allocated by thread T2 here:
+    #3 mfl_append
+    #4 mfl_ulidFreshRandom_0
+```
+
+It is `src/ulid.mfl:6`, and it is ours. `var ulidRand = []int{}` is a
+process-global slice that `ulidFreshRandom` reassigns with `append`. The
+backing array is allocated in the arena of whichever goroutine happened to
+call it, and machin frees that arena when the goroutine ends
+(`mfl_go_run_1`). Every later request then reads freed memory at line 13.
+Two ids minted in the same millisecond also race on `ulidLastMs`, so even
+without the crash the sequence is not sound under concurrency.
+
+**A global that holds arena-allocated memory is only valid for the lifetime
+of the goroutine that allocated it.** That is the MFL hazard to carry
+forward: `var x = []int{}` at file scope looks like static storage and is
+not. Scalars (`ulidLastMs`) are merely racy; anything with a heap payload is
+a use-after-free waiting for a second caller.
+
+This is what the earlier suspects were not. The JSRuntime is created and freed
+per call (`vendor/bkn_qjs.c:157,216`), and 1291 concurrent runs through
+`/v1/script/<name>/run` at c=2 did not crash. A hook whose script makes no host
+calls survived too. kv/store at c=8 sustained ~10k rps on the same SQLite
+handle, which is built `-DSQLITE_THREADSAFE=1`. The run-context globals at
+`src/script.mfl:415-423` are a real second bug -- they produce the
+`Error: no datastore bound to this run` 500s seen at concurrency 8 -- but they
+are not the crash. The crash needs only `newID()`, which is why it reaches any
+path that writes a row with a generated id.
 
 The acceptance suite never caught any of this because every assertion in it is a
 sequential `curl`. 113 of 113 says the contract is right; it says nothing about
 what happens when two callers arrive at once.
+
+### machin's `--race-safe` does not see framework-spawned goroutines
+
+`machin build --race-safe` refuses to build when it infers a data race, and it
+does catch the direct case -- two literal `go writer(...)` statements writing one
+global are reported. It does not catch the same global written by an HTTP
+handler, though `serve` spawns a goroutine per connection (`mfl_go_run_1` in the
+emitted C, as the ASan trace above shows). Nine lines are enough:
+
+```
+var hits = []int{}
+
+func main() {
+  serve(48711, func(req) {
+    hits = []int{}
+    hits = append(hits, 1)
+    return response("200", "text/plain", "ok")
+  })
+}
+```
+
+`machin build --race-safe` builds this without complaint. The whole of
+machin-bkn also builds clean under `--race-safe`, which is how the ULID bug
+survived to be found by a benchmark instead.
 
 ### Surface divergences found while building the harness
 

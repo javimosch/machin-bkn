@@ -50,9 +50,12 @@ STATIC="${BKN_STATIC:-1}"
 FLAGS=()
 if [ "$STATIC" = "1" ]; then FLAGS+=(--static); fi
 
+# BKN_STRIP=0 keeps the symbol table, which is what makes a crash in the
+# QuickJS bridge readable in gdb. Stripped is the default because the shipped
+# artifact has no use for it.
 if [ "${1:-}" = "-o" ]; then
   "$MACHIN" build "$OUT" "${FLAGS[@]}" -o "$2"
-  strip "$2" 2>/dev/null || true
+  if [ "${BKN_STRIP:-1}" = "1" ]; then strip "$2" 2>/dev/null || true; fi
 else
   "$MACHIN" run "$OUT"
 fi
