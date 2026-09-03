@@ -196,3 +196,57 @@ Note the reachability rule is deliberate elsewhere (the wasm target treats
 `export func` as a root, so a module needs no `main`). The gap is that there
 is no way to ask for a whole-program check of a library: `--all` or treating
 every top-level func as a root under `check` would close it.
+
+## 13. Linking a C library that calls back into MFL: two rules, both undocumented
+
+Embedding QuickJS meant a C archive that both *is called by* MFL and *calls*
+MFL. Two things have to be right and neither is written down.
+
+**1. `cflags` goes before the source; `link` goes after.** From `build.go`:
+
+```go
+// foreign linkage: extern cflags go before the source; -l libs after it
+```
+
+So an archive named in `cflags "-L… -lfoo"` is scanned *before* the object
+file that defines the MFL symbols it needs, and every callback comes out
+`undefined reference`. The `link "foo"` clause emits the same `-lfoo` after
+the source, which is the only ordering that works:
+
+```
+extern "bknqjs" {
+  cflags "-L/abs/path/vendor"
+  link "bknqjs"
+  link "m"
+  fn bkn_js_eval(string, string, int, int) string
+}
+```
+
+`link` is in the parser (`parser.go:227`) but not in the guide's `ffi-extern`
+example, which shows `cflags "-lm"` — fine for libm, wrong for anything that
+calls back.
+
+**2. The callee must be `export func`, or dead-code elimination deletes it.**
+MFL emits only functions reachable from `main` (see finding 12), and a
+reference from a C file is invisible to that analysis. The C shim then fails
+to link against a function that is right there in the source. `export func`
+is documented for the wasm target ("reachability roots, so a wasm module needs
+no main") and works identically on a native build:
+
+```
+export func hostCall(op, argsJSON) (out) { … }
+```
+
+Codegen renders it `char* mfl_hostCall_0(char* v_op, char* v_argsJSON)` —
+non-static, so a linked C file can declare and call it. The `_0` suffix is an
+implementation detail, so `build.sh` greps the emitted C for the exact
+signature and stops with an explanation if it ever moves.
+
+### And one shell trap, twice
+
+`set -o pipefail` plus `grep -q` is a false negative generator: `grep -q`
+exits at the first match, the writer takes SIGPIPE, and the pipeline reports
+failure *because the match succeeded*. It bit here first as
+`machin build --emit-c | grep -q` (read as "the compiler failed") and then
+again as `printf '%s' "$C" | grep -q` after capturing the output to avoid it.
+The fix is not to pipe at all: `[[ "$C" != *"needle"* ]]`.

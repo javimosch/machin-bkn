@@ -98,15 +98,162 @@ func listRuns(db, name, limit) (out, count) {
   out = "[" + join(parts, ",") + "]"
 }
 
-// runScript is the seam. Everything around it — registry, history, cron, the
-// HTTP routes — is finished and exercised; only the evaluator is missing, and
-// it reports that rather than pretending to have run.
+// --- the sandbox ----------------------------------------------------------
+//
+// The evaluator is QuickJS, vendored and linked statically (vendor/). Exactly
+// one symbol crosses in each direction: JS calls `__host(op, argsJSON)`, which
+// calls `hostCall` below. Every capability is dispatched here in MFL rather
+// than in C, so adding one never touches the bridge.
+//
+// hostCall is re-entrant from C in the middle of an eval, so the database
+// handle reaches it through a package global rather than a parameter.
+
+var gScriptDB = 0
+var gScriptName = ""
+
+func argAt(argsJSON, i) (out) {
+  out = ""
+  v, e := json_get(argsJSON, "[" + str(i) + "]")
+  if e != "" { return }
+  out = unescape(unquote(v))
+}
+
+// argRaw keeps a JSON value as JSON — for an object or array argument, where
+// unquoting would corrupt it.
+func argRaw(argsJSON, i) (out) {
+  out = "null"
+  v, e := json_get(argsJSON, "[" + str(i) + "]")
+  if e != "" { return }
+  out = v
+}
+
+func hostOK(valueJSON) (out) { out = "{\"ok\":true,\"value\":" + valueJSON + "}" }
+func hostErr(message) (out) { out = "{\"ok\":false,\"error\":" + jsonQuote(message) + "}" }
+
+// hostCall is the whole host surface. `export` marks it a reachability root:
+// nothing in MFL calls it, so without that the compiler would eliminate it and
+// the bridge would fail to link (see finding 12).
+export func hostCall(op, argsJSON) (out) {
+  db := gScriptDB
+  if db == 0 { out = hostErr("no datastore bound to this run")  return }
+
+  if op == "crypto.hmacSha256" { out = hostOK(jsonQuote(hmac_sha256(argAt(argsJSON, 0), argAt(argsJSON, 1))))  return }
+  if op == "crypto.sha256" { out = hostOK(jsonQuote(sha256(argAt(argsJSON, 0))))  return }
+  if op == "crypto.randomHex" {
+    n := 16
+    if looksNumeric(argRaw(argsJSON, 0)) { n = int(parse(argRaw(argsJSON, 0), 0)) }
+    if n <= 0 { n = 16 }
+    if n > 64 { n = 64 }
+    out = hostOK(jsonQuote(to_hex(rand_bytes(n))))
+    return
+  }
+  // Compared without an early exit, so the answer takes the same time
+  // whatever the inputs are — the whole point of offering it at all.
+  if op == "crypto.timingSafeEqual" {
+    a := argAt(argsJSON, 0)
+    b := argAt(argsJSON, 1)
+    same := 0
+    if len(a) != len(b) { same = 1 }
+    i := 0
+    while i < len(a) {
+      if i < len(b) {
+        if substr(a, i, i+1) != substr(b, i, i+1) { same = same + 1 }
+      }
+      i = i + 1
+    }
+    if same == 0 { out = hostOK("true") } else { out = hostOK("false") }
+    return
+  }
+
+  if op == "id.new" { out = hostOK(jsonQuote(newID()))  return }
+  if op == "now" {
+    unit := argAt(argsJSON, 0)
+    if unit == "unix" { out = hostOK(str(now()))  return }
+    if unit == "ms" { out = hostOK(str(now_ms()))  return }
+    out = hostOK(jsonQuote(nowStamp()))
+    return
+  }
+
+  if op == "log" {
+    level := argAt(argsJSON, 0)
+    if !validLevel(level) { level = "info" }
+    data := argRaw(argsJSON, 2)
+    if data == "null" { data = "{}" }
+    _, err := emitEvent(db, "script", "script.log", level, gScriptName, argAt(argsJSON, 1), data)
+    if err != "" { out = hostErr(err)  return }
+    out = hostOK("true")
+    return
+  }
+
+  if op == "events.emit" {
+    opts := argRaw(argsJSON, 2)
+    level := jsonField(opts, ".level")
+    subject := jsonField(opts, ".subject")
+    data, dataErr := json_get(opts, ".data")
+    if dataErr != "" { data = "{}" }
+    o, err := emitEvent(db, argAt(argsJSON, 0), argAt(argsJSON, 1), level, gScriptName, subject, data)
+    if err != "" { out = hostErr(err)  return }
+    out = hostOK(o)
+    return
+  }
+
+  if op == "kv.get" {
+    v, found, err := kvGet(db, argAt(argsJSON, 0))
+    if err != "" { out = hostErr(err)  return }
+    if !found { out = hostOK("null")  return }
+    out = hostOK(v)
+    return
+  }
+  if op == "kv.set" {
+    opts := argRaw(argsJSON, 2)
+    kind := jsonField(opts, ".type")
+    if kind == "" { kind = "string" }
+    value := argAt(argsJSON, 1)
+    if kind == "json" { value = argRaw(argsJSON, 1) }
+    e, err := kvSet(db, argAt(argsJSON, 0), value, kind, jsonField(opts, ".description"), jsonField(opts, ".public") == "true")
+    if err != "" { out = hostErr(err)  return }
+    out = hostOK(e)
+    return
+  }
+  if op == "kv.delete" {
+    if kvDelete(db, argAt(argsJSON, 0)) { out = hostOK("true") } else { out = hostOK("false") }
+    return
+  }
+  if op == "kv.list" { out = hostOK(kvList(db, argAt(argsJSON, 0), false))  return }
+
+  out = hostErr("unknown host capability: " + op)
+}
+
+// runScript evaluates a stored script. The registry, the history and the
+// timeout are enforced here; the sandbox's shape is the prelude in
+// vendor/bkn_qjs.c.
 func runScript(db, name, input) (value, err) {
   value = "null"
   err = ""
   s, found := findScript(db, name)
   if !found { err = "script not found"  return }
-  if s.enabled != 1 { err = "script is disabled"  return }
-  err = "script runtime is not available in this build"
-  recordRun(db, name, "error", 0, err, "[]", "null")
+  if s.enabled != 1 { err = "script is disabled" return }
+  if input == "" { input = "{}" }
+
+  gScriptDB = db
+  gScriptName = name
+  started := now_ms()
+  raw := bkn_js_eval(s.source, input, s.timeout_ms, 0)
+  took := now_ms() - started
+  gScriptDB = 0
+  gScriptName = ""
+
+  ok, _ := json_get(raw, ".ok")
+  logs, logErr := json_get(raw, ".logs")
+  if logErr != "" { logs = "[]" }
+  if ok != "true" {
+    err = jsonField(raw, ".error")
+    if err == "" { err = "the script failed with no message" }
+    recordRun(db, name, "error", took, err, logs, "null")
+    return
+  }
+  v, vErr := json_get(raw, ".value")
+  if vErr != "" { v = "null" }
+  value = v
+  recordRun(db, name, "ok", took, "", logs, value)
 }
