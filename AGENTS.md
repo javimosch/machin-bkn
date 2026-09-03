@@ -240,6 +240,11 @@ Medians of 5 interleaved repetitions, concurrency 8, 5s per scenario:
 | file-64k    |  6447 |  7552 | 0.64 ms | 0.97 ms |    5.0 ms |   2.8 ms |
 | hook-script |    80 |   n/a | 9.48 ms |     n/a | 2343.0 ms |     n/a |
 
+`hook-script` has no concurrent mfl number because the server did not survive
+the scenario. Serially (c=1) it is 62 rps / 13.5 ms p50 for bkn against
+47 rps / 13.7 ms for this build -- both dominated by the run-history write, not
+by the JS engine.
+
 Cold start 21 ms vs 9 ms; idle RSS 17.2 MB vs 3.3 MB; binary 20.1 MB stripped
 and dynamically linked vs 7.8 MB static.
 
@@ -248,7 +253,7 @@ differences are the write path (Go is ~9x better at p50 and ~5x worse at p99 --
 Go absorbs writes and pays in a multi-second tail, this build spreads the same
 cost evenly) and the script path, which does not have a number at all:
 
-### The script path segfaults at concurrency 2
+### The script path segfaulted at concurrency 2 (fixed)
 
 Reproducible and hard. Two simultaneous requests to a hook kill the server:
 
@@ -307,6 +312,25 @@ path that writes a row with a generated id.
 The acceptance suite never caught any of this because every assertion in it is a
 sequential `curl`. 113 of 113 says the contract is right; it says nothing about
 what happens when two callers arrive at once.
+
+**Fixed** in `src/ulid.mfl`. The 80 random bits now live in two integers rather
+than a slice, so nothing arena-allocated is reachable from a global, and minting
+is serialized: machin has no mutex and no buffered channel, so the lock is a
+keeper goroutine that hands a token out on an unbuffered channel and takes it
+back (`ulidKeeper`, started first thing in `main()` because the CLI paths mint
+ids too). The critical section covers only the counter -- the id is formatted
+after the token goes back, in the caller's own arena.
+
+Verified: the server survives c=2/4/8 with zero transport errors; an ASan build
+served 2314 concurrent requests with no memory errors at all; 480 ids minted
+across 8 concurrent writers were all unique and well-formed; the gate is back to
+113 of 113.
+
+Still open is the second bug: the run-context globals at `src/script.mfl:415-423`
+mean roughly half of concurrent hook requests answer 500 with
+`Error: no datastore bound to this run`. That is a lost request, not a corrupt
+process, and it needs a per-run context across the FFI boundary rather than a
+process global.
 
 ### machin's `--race-safe` does not see framework-spawned goroutines
 

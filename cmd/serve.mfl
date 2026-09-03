@@ -591,6 +591,9 @@ func handle(req) (res) {
 }
 
 func main() {
+  // The id keeper is the lock guarding ULID minting; nothing may call newID()
+  // before it runs, and the CLI paths below mint ids too, so it starts first.
+  go ulidKeeper()
   a := args()
   if len(a) > 1 {
     if a[1] != "serve" {
