@@ -1,0 +1,13 @@
+# bkn 0.1.1
+
+A single-binary backend core: namespaced document collections (store) and
+typed settings (kv) over embedded SQLite. The CLI is the primary interface;
+these HTTP routes mirror it.
+
+Full mental model:  GET /guide   (or run: bkn guide)
+Command catalog:    bkn help-json
+
+Quick start:
+  curl -s $HOST/v1/store/myapp/users
+  curl -s $HOST/v1/kv?public=1
+  curl -s $HOST/_health
