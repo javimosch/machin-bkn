@@ -207,6 +207,41 @@ and the stale server survives. A surviving server is the failure mode that
 looks like a code regression: it holds the port, the new binary's bind fails,
 and the suite silently tests the *old* process against the *old* database.
 
+## The concurrency gate
+
+`./test/concurrency.sh [binary]` -- run it after any change to the script
+bridge, the id minter, or anything else touched from a request handler. It
+takes about a minute.
+
+It exists because the acceptance suite cannot see this class of bug. 113 of 113
+passed on a build that segfaulted at concurrency 2 on a public hook route and
+answered 500 to half of concurrent hook requests. Every assertion in that suite
+is a sequential `curl`, so no arrangement of them would ever have caught it, and
+`machin check` and `--race-safe` were both clean too (see finding 16).
+
+Each route class is driven at concurrency 8 and must answer every request 2xx,
+lose none at the transport, and leave the process alive; then 200 ids are minted
+across 8 connections at once and must all be distinct.
+
+It is validated against the bugs it was written for, which is the part that
+makes it worth keeping:
+
+| binary | result |
+|---|---|
+| before either fix | exit 1 -- segfault, 3 classes failed, server dead |
+| ULID fixed, run context still global | exit 1 -- hooks 94/179 non-2xx, server alive |
+| both fixed | exit 0 -- 7 of 7, ~220k requests, zero failures |
+
+Two traps this script already stepped in, kept here because they are easy to
+reintroduce: a bare `wait` also waits on the server it started and hangs
+forever, and eight subshells appending to one file interleave their writes (the
+first version reported 146 of 200 ids for that reason and would have masked a
+genuine shortfall).
+
+Note that `newID()` now needs `go ulidKeeper()` running, so any new entry point
+that mints ids must start it -- `test/ulid_main.mfl` did not, and machin's
+runtime caught it as a deadlock rather than anything subtle.
+
 ## Benchmark against the Go build, and the parity gaps it exposed
 
 `bench/` compares this build against `~/ai/bkn/bin/bkn` on one machine

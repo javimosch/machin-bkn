@@ -1,7 +1,15 @@
-
+// newID() mints under a lock held by ulidKeeper, so any program that calls it
+// must start the keeper first -- including this test. Forgetting is loud
+// rather than subtle: machin's runtime reports "deadlock -- all 1 goroutine(s)
+// blocked" and exits, which is how this test caught the omission when the lock
+// was introduced.
 func main() {
+  go ulidKeeper()
+
   prev := ""
   ok := true
+  seen := make(map[string]int)
+  dupes := 0
   i := 0
   while i < 200 {
     id := newID()
@@ -9,9 +17,12 @@ func main() {
     if prev != "" {
       if id <= prev { println("NOT SORTED: " + prev + " then " + id)  ok = false }
     }
+    if has(seen, id) { dupes = dupes + 1  ok = false }
+    seen[id] = 1
     prev = id
     i = i + 1
   }
-  if ok { println("ulid ok: 200 ids, 26 chars, strictly increasing") }
+  if dupes > 0 { println("DUPLICATES: " + str(dupes)) }
+  if ok { println("ulid ok: 200 ids, 26 chars, unique, strictly increasing") }
   println("sample: " + newID())
 }
