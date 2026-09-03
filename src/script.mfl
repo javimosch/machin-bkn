@@ -106,12 +106,14 @@ func listRuns(db, name, limit) (out, count) {
 // calls `hostCall` below. Every capability is dispatched here in MFL rather
 // than in C, so adding one never touches the bridge.
 //
-// hostCall is re-entrant from C in the middle of an eval, so the database
-// handle reaches it through a package global rather than a parameter.
-
-var gScriptDB = 0
-var gScriptName = ""
-var gScriptNet = ""
+// hostCall is re-entrant from C in the middle of an eval, and the run context
+// reaches it as arguments. It used to reach it through package globals, which
+// is wrong the moment two runs overlap: each set the globals on entry and
+// cleared them on exit, so whichever finished first unbound the other, and the
+// loser answered "no datastore bound to this run" -- about half of concurrent
+// hook requests. There is no per-goroutine storage in MFL to hide it in
+// either, so the context travels with the call: MFL hands it to bkn_js_eval,
+// C keeps it in that eval's own struct, and it comes back on every host call.
 
 func argAt(argsJSON, i) (out) {
   out = ""
@@ -135,8 +137,7 @@ func hostErr(message) (out) { out = "{\"ok\":false,\"error\":" + jsonQuote(messa
 // hostCall is the whole host surface. `export` marks it a reachability root:
 // nothing in MFL calls it, so without that the compiler would eliminate it and
 // the bridge would fail to link (see finding 12).
-export func hostCall(op, argsJSON) (out) {
-  db := gScriptDB
+export func hostCall(op, argsJSON, db, name, net) (out) {
   if db == 0 { out = hostErr("no datastore bound to this run")  return }
 
   if op == "crypto.hmac" { out = hostOK(jsonQuote(hmac_sha256(argAt(argsJSON, 0), argAt(argsJSON, 1))))  return }
@@ -181,7 +182,7 @@ export func hostCall(op, argsJSON) (out) {
     if !validLevel(level) { level = "info" }
     data := argRaw(argsJSON, 2)
     if data == "null" { data = "{}" }
-    _, err := emitEvent(db, "script", "script.log", level, gScriptName, argAt(argsJSON, 1), data)
+    _, err := emitEvent(db, "script", "script.log", level, name, argAt(argsJSON, 1), data)
     if err != "" { out = hostErr(err)  return }
     out = hostOK("true")
     return
@@ -193,7 +194,7 @@ export func hostCall(op, argsJSON) (out) {
     subject := jsonField(opts, ".subject")
     data, dataErr := json_get(opts, ".data")
     if dataErr != "" { data = "{}" }
-    o, err := emitEvent(db, argAt(argsJSON, 0), argAt(argsJSON, 1), level, gScriptName, subject, data)
+    o, err := emitEvent(db, argAt(argsJSON, 0), argAt(argsJSON, 1), level, name, subject, data)
     if err != "" { out = hostErr(err)  return }
     out = hostOK(o)
     return
@@ -326,7 +327,7 @@ export func hostCall(op, argsJSON) (out) {
   // through here, and only to a host its allow-net list names.
   if op == "http.fetch" {
     url := argAt(argsJSON, 0)
-    if !netAllowed(gScriptNet, url) { out = hostErr("host is not in this script's allow-net list: " + url)  return }
+    if !netAllowed(net, url) { out = hostErr("host is not in this script's allow-net list: " + url)  return }
     opts := argRaw(argsJSON, 1)
     method := jsonField(opts, ".method")
     if method == "" { method = "GET" }
@@ -412,15 +413,9 @@ func runScript(db, name, input) (value, err) {
   if s.enabled != 1 { err = "script is disabled" return }
   if input == "" { input = "{}" }
 
-  gScriptDB = db
-  gScriptName = name
-  gScriptNet = s.allow_net
   started := now_ms()
-  raw := bkn_js_eval(s.source, input, s.timeout_ms, 0)
+  raw := bkn_js_eval(s.source, input, s.timeout_ms, 0, db, name, s.allow_net)
   took := now_ms() - started
-  gScriptDB = 0
-  gScriptName = ""
-  gScriptNet = ""
 
   ok, _ := json_get(raw, ".ok")
   logs, logErr := json_get(raw, ".logs")

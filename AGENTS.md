@@ -238,12 +238,13 @@ Medians of 5 interleaved repetitions, concurrency 8, 5s per scenario:
 | store-query |  1603 |  1394 | 4.60 ms | 5.42 ms |   11.1 ms |  12.8 ms |
 | store-write |   219 |   136 | 4.19 ms | 38.3 ms | 1134.3 ms | 224.0 ms |
 | file-64k    |  6447 |  7552 | 0.64 ms | 0.97 ms |    5.0 ms |   2.8 ms |
-| hook-script |    80 |   n/a | 9.48 ms |     n/a | 2343.0 ms |     n/a |
+| hook-script |    82 |    72 | 12.6 ms | 87.8 ms | 2239.8 ms | 509.3 ms |
 
-`hook-script` has no concurrent mfl number because the server did not survive
-the scenario. Serially (c=1) it is 62 rps / 13.5 ms p50 for bkn against
-47 rps / 13.7 ms for this build -- both dominated by the run-history write, not
-by the JS engine.
+`hook-script` is the one row measured after the two concurrency fixes below;
+the rest predate them, and only this scenario was affected. It has the same
+shape as `store-write`: Go wins p50 by ~7x and loses p99 by ~4x. Both are
+dominated by the per-run history write, not by the JS engine -- serially (c=1)
+the two are within 2% of each other on p50.
 
 Cold start 21 ms vs 9 ms; idle RSS 17.2 MB vs 3.3 MB; binary 20.1 MB stripped
 and dynamically linked vs 7.8 MB static.
@@ -326,11 +327,40 @@ served 2314 concurrent requests with no memory errors at all; 480 ids minted
 across 8 concurrent writers were all unique and well-formed; the gate is back to
 113 of 113.
 
-Still open is the second bug: the run-context globals at `src/script.mfl:415-423`
-mean roughly half of concurrent hook requests answer 500 with
-`Error: no datastore bound to this run`. That is a lost request, not a corrupt
-process, and it needs a per-run context across the FFI boundary rather than a
-process global.
+### The run context was a process global (fixed)
+
+The second bug, and the reason roughly half of concurrent hook requests used to
+answer 500 with `Error: no datastore bound to this run`: `runScript` set
+`gScriptDB`/`gScriptName`/`gScriptNet` on entry and cleared them on exit, so
+with two runs in flight whichever finished first unbound the other.
+
+There is no per-goroutine storage in MFL to hide that in, and an MFL-side
+registry keyed by run id would just be a global map holding arena-allocated
+strings -- the hazard of #648 again. So the context travels with the call
+instead: `bkn_js_eval` now takes `(db, name, net)`, C keeps them in that eval's
+own `BknRt` (already a per-call stack local) and hangs it on the context with
+`JS_SetContextOpaque`, and `js_host` passes them back on every host call. The
+MFL entry point is now `hostCall(op, argsJSON, db, name, net)` and there are no
+script globals at all.
+
+Verified under concurrency, one check per context field:
+
+- `db` -- 2916 requests at c=8 under ASan: no failures, no memory errors.
+- `name` -- two scripts logging their own identity, hammered together: 183 and
+  187 events, each attributed to the right script, **zero** mismatches over 370
+  concurrent runs.
+- `net` -- a script with no allow-net and one allowing `example.com`, run
+  concurrently: 40/40 refused and 12/12 reached. No leak across that boundary,
+  which is the one where a leak would be a security bug.
+
+Clean at c=1 through c=16 with zero non-2xx, and the gate passes 113 of 113 on
+two consecutive runs.
+
+While widening the extern, a latent signature mismatch surfaced and is also
+fixed: MFL emits `int` as `int64_t`, so `bkn_js_eval`'s `timeout_ms` and
+`mem_bytes` had been declared `int` on the C side since the bridge was written.
+It worked only because the values are small and each argument had its own
+register -- a mismatch across translation units that no linker will catch.
 
 ### machin's `--race-safe` does not see framework-spawned goroutines
 

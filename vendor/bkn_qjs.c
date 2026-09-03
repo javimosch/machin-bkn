@@ -16,10 +16,18 @@
 #include <time.h>
 #include "quickjs.h"
 
-extern char *mfl_hostCall_0(char *op, char *args);
+// The run context travels with the call rather than sitting in an MFL global.
+// A global would be shared by every concurrent run: two overlapping requests
+// clobbered each other's datastore handle, and one of them then answered
+// "no datastore bound to this run". It is per-call state, so it lives in the
+// per-call struct below and comes back to MFL as arguments.
+extern char *mfl_hostCall_0(char *op, char *args, int64_t db, char *name, char *net);
 
 typedef struct {
     int64_t deadline_ms;
+    int64_t db;          /* the datastore handle this run may touch */
+    const char *name;    /* the script's name, for the events it emits */
+    const char *net;     /* its allow-net list */
 } BknRt;
 
 static int64_t now_ms_(void) {
@@ -38,7 +46,13 @@ static JSValue js_host(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     const char *op = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
     const char *args = argc > 1 ? JS_ToCString(ctx, argv[1]) : NULL;
     if (!op) return JS_ThrowTypeError(ctx, "__host: missing op");
-    char *res = mfl_hostCall_0((char *)op, (char *)(args ? args : "[]"));
+    // Set on the context by bkn_js_eval, so a re-entrant host call always sees
+    // the run it belongs to even while other runs are in flight.
+    BknRt *b = (BknRt *)JS_GetContextOpaque(ctx);
+    char *res = mfl_hostCall_0((char *)op, (char *)(args ? args : "[]"),
+                               b ? b->db : 0,
+                               (char *)((b && b->name) ? b->name : ""),
+                               (char *)((b && b->net) ? b->net : ""));
     JSValue out = JS_NewString(ctx, res ? res : "{\"ok\":false,\"error\":\"host returned nothing\"}");
     JS_FreeCString(ctx, op);
     if (args) JS_FreeCString(ctx, args);
@@ -153,16 +167,27 @@ static JSValue settle(JSContext *ctx, JSValue v) {
 
 // bkn_js_eval runs `source` with `input` as the handler's argument and
 // returns a malloc'd JSON document the caller must free with bkn_js_free.
-char *bkn_js_eval(const char *source, const char *input, int timeout_ms, int mem_bytes) {
+// Every integer here is int64_t because that is what MFL's `int` emits as; the
+// declaration on the MFL side is
+//   extern const char* bkn_js_eval(const char*, const char*, int64_t, int64_t,
+//                                  int64_t, const char*, const char*);
+// and a narrower type here is a signature mismatch across translation units
+// that no linker will catch.
+char *bkn_js_eval(const char *source, const char *input, int64_t timeout_ms, int64_t mem_bytes,
+                  int64_t db, const char *name, const char *net) {
     JSRuntime *rt = JS_NewRuntime();
     if (!rt) return strdup("{\"ok\":false,\"error\":\"cannot create a JS runtime\"}");
     BknRt b;
     b.deadline_ms = timeout_ms > 0 ? now_ms_() + timeout_ms : 0;
+    b.db = db;
+    b.name = name;
+    b.net = net;
     JS_SetMemoryLimit(rt, mem_bytes > 0 ? (size_t)mem_bytes : (size_t)64 * 1024 * 1024);
     JS_SetMaxStackSize(rt, 1024 * 1024);
     JS_SetInterruptHandler(rt, bkn_interrupt, &b);
     JSContext *ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); return strdup("{\"ok\":false,\"error\":\"cannot create a JS context\"}"); }
+    JS_SetContextOpaque(ctx, &b);
 
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "__host", JS_NewCFunction(ctx, js_host, "__host", 2));

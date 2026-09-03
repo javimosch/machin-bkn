@@ -18,7 +18,7 @@ extern "bknqjs" {
   cflags "-L$HERE/vendor"
   link "bknqjs"
   link "m"
-  fn bkn_js_eval(string, string, int, int) string
+  fn bkn_js_eval(string, string, int, int, int, string, string) string
 }
 EOF
 FW="${MACHIN_FW:-$HOME/ai/machin/framework}"
