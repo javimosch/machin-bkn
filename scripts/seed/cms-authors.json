@@ -1,0 +1,8 @@
+{
+  "collection": "cms/authors",
+  "fields": [
+    { "name": "name",  "type": "string", "required": true, "minLength": 2 },
+    { "name": "email", "type": "string", "required": true, "unique": true },
+    { "name": "bio",   "type": "string", "maxLength": 2000 }
+  ]
+}

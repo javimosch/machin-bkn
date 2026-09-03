@@ -116,8 +116,10 @@ point of doing it in machin.
 | stripe | 10 | pass |
 | forms | 11 | pass |
 | cms | 15 | pass |
+| headless | 14 | pass |
 
-99 of 113.
+**113 of 113.** The gate is met: every assertion in `~/ai/bkn/test/` passes
+unmodified against the machin build.
 
 ## The script sandbox
 
@@ -180,6 +182,15 @@ for n in i18n redirects flags configs; do
   mbkn script create $n --file scripts/$n.js
   mbkn hooks create $n --script $n --rate-limit 120
 done
+mbkn store put cms/models --id articles --data @scripts/seed/cms-articles.json
+mbkn store put cms/models --id authors  --data @scripts/seed/cms-authors.json
+# two API tokens, written to test/cmstok.txt (rw on line 1, ro on line 2 —
+# gitignored in the bkn repo alongside admin.tok, so it is a credential the
+# operator supplies, not part of any assertion)
+mbkn store put cms/tokens --id "$RW" --data '{"scopes":{"articles":"rw","authors":"rw"}}'
+mbkn store put cms/tokens --id "$RO" --data '{"scopes":{"articles":"r","authors":"r"}}'
+mbkn script create cms --file scripts/cms.js
+mbkn hooks create cms --script cms --rate-limit 300
 BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
 ```
 

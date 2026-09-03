@@ -1,0 +1,12 @@
+{
+  "collection": "cms/articles",
+  "fields": [
+    { "name": "title",        "type": "string", "required": true, "minLength": 3, "maxLength": 200 },
+    { "name": "slug",         "type": "string", "required": true, "unique": true, "regex": "^[a-z0-9][a-z0-9-]*$" },
+    { "name": "status",       "type": "enum",   "values": ["draft", "live", "archived"], "default": "draft" },
+    { "name": "read_minutes", "type": "number" },
+    { "name": "published_at", "type": "string" },
+    { "name": "body",         "type": "string", "maxLength": 100000 },
+    { "name": "author",       "type": "ref",    "model": "authors" }
+  ]
+}
