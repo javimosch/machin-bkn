@@ -26,7 +26,7 @@ func storeRoutes(req, q, segs) (res, handled) {
 
       records := listJSON(gDB, ns, coll, filters, orderBy, desc, limit, offset)
       total := countDocs(gDB, ns, coll, filters)
-      count := countArray(records)
+      count := countArray(gDB, records)
       res = jsonRes("200 OK", "{\"ok\":true,\"collection\":" + jsonQuote(ref) + ",\"count\":" + str(count) + ",\"total\":" + str(total) + ",\"records\":" + records + "}")
       return
     }
@@ -146,7 +146,7 @@ func authRoutes(req, q, segs) (res) {
   }
   if leaf == "orgs" {
     orgs := listOrgs(gDB)
-    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(orgs)) + ",\"orgs\":" + orgs + "}")
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, orgs)) + ",\"orgs\":" + orgs + "}")
     return
   }
   res = errRes("404 Not Found", "not_found", "no such route")
@@ -393,7 +393,7 @@ func filesRoutes(req, q, segs) (res) {
   if len(segs) == 2 {
     if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
     nss := listNs(gDB)
-    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(nss)) + ",\"namespaces\":" + nss + "}")
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, nss)) + ",\"namespaces\":" + nss + "}")
     return
   }
 
@@ -466,7 +466,7 @@ func kvRoutes(req, q, segs) (res) {
       }
     }
     entries := kvList(gDB, qGet(q, "prefix"), publicOnly)
-    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(entries)) + ",\"entries\":" + entries + "}")
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, entries)) + ",\"entries\":" + entries + "}")
     return
   }
 
@@ -511,9 +511,12 @@ func kvRoutes(req, q, segs) (res) {
   res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
 }
 
-func countArray(arr) (n) {
+// Takes the handle rather than reading gDB: gDB is set only by the server, so
+// this silently answered 0 for every CLI caller -- `store list` reported
+// "count": 0 next to two records.
+func countArray(db, arr) (n) {
   n = 0
-  rows := sqlite_query(gDB, "SELECT COUNT(*) AS c FROM json_each(?)", []string{arr})
+  rows := sqlite_query(db, "SELECT COUNT(*) AS c FROM json_each(?)", []string{arr})
   if rows == "[]" { return }
   v, e := json_get(rows, "[0].c")
   if e == "" { n = int(parse(v, 0)) }

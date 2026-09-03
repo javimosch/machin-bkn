@@ -431,6 +431,273 @@ func main() {
 machin-bkn also builds clean under `--race-safe`, which is how the ULID bug
 survived to be found by a benchmark instead.
 
+### Surface divergences, and what closing them turned up
+
+The sandbox and the CLI both diverged from the Go build, and the gate could not
+see either: the scripts exercising the sandbox are ones written here against
+this surface, and the CLI only ever had to satisfy the setup runbook.
+
+Worse than any naming difference, **`bkn.files.*` and `bkn.auth.*` were named in
+the prelude and implemented nowhere.** Calling `bkn.files.list` threw
+`unknown host capability`. The surface probe reported them present because it
+reads the prelude's keys, so they looked fine right up until something called
+one. All are implemented now, with shapes and argument order read off a running
+Go build rather than guessed -- `createUser` takes an options map third,
+`createOrg` takes a slug and a name, `events.stats` takes a bare string, and
+`verify` takes an access token and answers the claims.
+
+Shape fixes: `bkn.log` and `bkn.id` are functions on the published surface and
+were objects here, so a script copied from the documentation threw. Both are
+now callable with the object form kept, since scripts here use it.
+
+Two bugs fell out of the work rather than the comparison:
+
+- `files` allow-types honoured only exact matches, so a namespace declared
+  `--allow-type 'image/*'` -- the form the guide documents -- refused
+  everything. An allow-list that silently refuses everything is as wrong as one
+  that silently permits everything.
+- `countArray` read the `gDB` global, which only the server sets, so every CLI
+  caller got 0. `files ns list` had been printing `"count": 0` beside a
+  populated array for as long as it has existed, and it was in output I had
+  already read without registering it.
+
+`serve` also claimed to be listening before it had bound: a port already in use
+printed a success line and exited 0. That let a stale server keep answering for
+an old database while a test run believed it was talking to the new one, worth
+13 mysterious failures before the log admitted `Address already in use`. It now
+exits 75.
+
+The CLI gained the read half it never had -- `version`, `help-json`,
+`store get|list|find|collections`, `files put|get|show|list`, `events
+list|stats`, `script run|runs`, and the read side of `auth`. Still missing:
+`guide`, `script test`, `hooks test`, `store create|patch|delete`, `kv rekey`,
+the `daemon` verbs, and the lifecycle commands (`update`, `install`,
+`telemetry`, `feedback`).
+
+## The concurrency gate
+
+`./test/concurrency.sh [binary]` -- run it after any change to the script
+bridge, the id minter, or anything else touched from a request handler. It
+takes about a minute.
+
+It exists because the acceptance suite cannot see this class of bug. 113 of 113
+passed on a build that segfaulted at concurrency 2 on a public hook route and
+answered 500 to half of concurrent hook requests. Every assertion in that suite
+is a sequential `curl`, so no arrangement of them would ever have caught it, and
+`machin check` and `--race-safe` were both clean too (see finding 16).
+
+Each route class is driven at concurrency 8 and must answer every request 2xx,
+lose none at the transport, and leave the process alive; then 200 ids are minted
+across 8 connections at once and must all be distinct.
+
+It is validated against the bugs it was written for, which is the part that
+makes it worth keeping:
+
+| binary | result |
+|---|---|
+| before either fix | exit 1 -- segfault, 3 classes failed, server dead |
+| ULID fixed, run context still global | exit 1 -- hooks 94/179 non-2xx, server alive |
+| both fixed | exit 0 -- 7 of 7, ~220k requests, zero failures |
+
+Two traps this script already stepped in, kept here because they are easy to
+reintroduce: a bare `wait` also waits on the server it started and hangs
+forever, and eight subshells appending to one file interleave their writes (the
+first version reported 146 of 200 ids for that reason and would have masked a
+genuine shortfall).
+
+Note that `newID()` now needs `go ulidKeeper()` running, so any new entry point
+that mints ids must start it -- `test/ulid_main.mfl` did not, and machin's
+runtime caught it as a deadlock rather than anything subtle.
+
+## Benchmark against the Go build, and the parity gaps it exposed
+
+`bench/` compares this build against `~/ai/bkn/bin/bkn` on one machine
+(8-core i5-11320H, both on loopback, both over the same fixture). `bench/setup.sh`
+seeds a database, `bench/run.sh` drives one implementation through seven
+scenarios, `bench/compare.sh` alternates the two across repetitions, and
+`bench/summarize.py` reduces to medians.
+
+Two harness rules that the numbers depend on:
+
+- **Interleave, don't run in blocks.** A first attempt measured Go's kv-get at
+  6.5k rps in one pass and 13.2k in the next on an unchanged binary. Whatever
+  drifts on this machine drifts across both if they take turns, and cancels in
+  the median.
+- **Assert the fixture before measuring.** `run.sh` refuses to start unless all
+  four probe routes return 200, and it records the blob hash and the hook's
+  output so the summary can show both servers produced the same answer. An
+  earlier version had no such check and would have reported the throughput of
+  404s: the MFL CLI has no `files put`, `set -e` aborted the seed there, and
+  half the fixture was missing.
+
+Medians of 7 interleaved repetitions, concurrency 8, 5s per scenario, both
+implementations reseeded from the same fixture before every repetition:
+
+| scenario | bkn rps | mfl rps | bkn p50 | mfl p50 | bkn p99 | mfl p99 |
+|---|---|---|---|---|---|---|
+| kv-get      | 9319 | 6847 | 0.42 ms | 0.91 ms |    4.0 ms |   4.5 ms |
+| store-get   | 9879 | 9933 | 0.40 ms | 0.64 ms |    3.7 ms |   2.9 ms |
+| store-list  | 2635 | 2720 | 2.56 ms | 2.65 ms |   10.2 ms |   7.8 ms |
+| store-query | 1146 | 1379 | 6.18 ms | 5.32 ms |   19.4 ms |  14.4 ms |
+| store-write |  156 |  209 | 4.52 ms | 35.3 ms | 1439.8 ms | 134.4 ms |
+| file-64k    | 5377 | 6256 | 0.94 ms | 1.09 ms |    6.0 ms |   4.1 ms |
+| hook-script |   85 |   89 | 9.39 ms | 82.0 ms | 1997.2 ms | 235.5 ms |
+
+Zero failed requests on either side, in every scenario. Cold start 30 ms vs
+9 ms; idle RSS 17.1 MB vs 3.5 MB; binary 20.1 MB stripped and dynamically
+linked vs 7.8 MB static.
+
+Two caveats on these numbers. The machine carried an ambient load average of
+7-10 from unrelated processes throughout, so the absolute rps figures are
+depressed and are **not** comparable with any other run; interleaving keeps the
+bkn-vs-mfl comparison fair, and that ratio is the part worth reading. And each
+repetition reseeds both databases, which the earlier run did not do -- without
+it `script_runs` grows by a row per hook call and the later repetitions measure
+a bigger database than the earlier ones, a drift interleaving cannot cancel
+because it accumulates on both sides at once.
+
+The read paths are a wash: five of the seven scenarios sit inside the run-to-run
+spread, and `kv-get` is the only one where bkn is clearly ahead. The real
+difference is the two write-bearing paths, and they say the same thing twice.
+On `store-write` bkn is 8x better at p50 and 11x worse at p99; on `hook-script`
+9x better at p50 and 8x worse at p99. bkn absorbs a write and pays for it in a
+multi-second tail; this build spreads the same cost evenly and never spikes.
+Which is preferable is a product question, not a benchmark result -- but a
+1.4-second p99 on a webhook endpoint is the kind of thing that shows up as a
+provider timing out and retrying.
+
+### The script path segfaulted at concurrency 2 (fixed)
+
+Reproducible and hard. Two simultaneous requests to a hook kill the server:
+
+```
+c=1  pre_load_http=200  after=alive     requests=293  transport_errors=0
+c=2  pre_load_http=200  after=CRASHED   requests=298  transport_errors=12005
+c=3  pre_load_http=200  after=CRASHED   requests=63   transport_errors=143864
+```
+
+`wait` on the server reports 139, so SIGSEGV. This is on `/v1/hooks/<name>`,
+which is public and unauthenticated by design -- two concurrent callers take the
+process down. The Go build served the same load across all five repetitions
+without a single error.
+
+Root cause, from an AddressSanitizer build (`BKN_STATIC=0 BKN_STRIP=0
+CC=<cc wrapper adding -fsanitize=address> ./build.sh`):
+
+```
+ERROR: AddressSanitizer: heap-use-after-free
+READ of size 8 ... thread T5
+    #0 mfl_ulidBumpRandom_0
+    #1 mfl_newID_0
+    #2 mfl_recordRun_0        <- every hook run records a run row
+freed by thread T2 here:
+    #1 mfl_arena_free
+    #2 mfl_go_run_1           <- T2's request ended, its arena went with it
+previously allocated by thread T2 here:
+    #3 mfl_append
+    #4 mfl_ulidFreshRandom_0
+```
+
+It is `src/ulid.mfl:6`, and it is ours. `var ulidRand = []int{}` is a
+process-global slice that `ulidFreshRandom` reassigns with `append`. The
+backing array is allocated in the arena of whichever goroutine happened to
+call it, and machin frees that arena when the goroutine ends
+(`mfl_go_run_1`). Every later request then reads freed memory at line 13.
+Two ids minted in the same millisecond also race on `ulidLastMs`, so even
+without the crash the sequence is not sound under concurrency.
+
+**A global that holds arena-allocated memory is only valid for the lifetime
+of the goroutine that allocated it.** That is the MFL hazard to carry
+forward: `var x = []int{}` at file scope looks like static storage and is
+not. Scalars (`ulidLastMs`) are merely racy; anything with a heap payload is
+a use-after-free waiting for a second caller.
+
+This is what the earlier suspects were not. The JSRuntime is created and freed
+per call (`vendor/bkn_qjs.c:157,216`), and 1291 concurrent runs through
+`/v1/script/<name>/run` at c=2 did not crash. A hook whose script makes no host
+calls survived too. kv/store at c=8 sustained ~10k rps on the same SQLite
+handle, which is built `-DSQLITE_THREADSAFE=1`. The run-context globals at
+`src/script.mfl:415-423` are a real second bug -- they produce the
+`Error: no datastore bound to this run` 500s seen at concurrency 8 -- but they
+are not the crash. The crash needs only `newID()`, which is why it reaches any
+path that writes a row with a generated id.
+
+The acceptance suite never caught any of this because every assertion in it is a
+sequential `curl`. 113 of 113 says the contract is right; it says nothing about
+what happens when two callers arrive at once.
+
+**Fixed** in `src/ulid.mfl`. The 80 random bits now live in two integers rather
+than a slice, so nothing arena-allocated is reachable from a global, and minting
+is serialized: machin has no mutex and no buffered channel, so the lock is a
+keeper goroutine that hands a token out on an unbuffered channel and takes it
+back (`ulidKeeper`, started first thing in `main()` because the CLI paths mint
+ids too). The critical section covers only the counter -- the id is formatted
+after the token goes back, in the caller's own arena.
+
+Verified: the server survives c=2/4/8 with zero transport errors; an ASan build
+served 2314 concurrent requests with no memory errors at all; 480 ids minted
+across 8 concurrent writers were all unique and well-formed; the gate is back to
+113 of 113.
+
+### The run context was a process global (fixed)
+
+The second bug, and the reason roughly half of concurrent hook requests used to
+answer 500 with `Error: no datastore bound to this run`: `runScript` set
+`gScriptDB`/`gScriptName`/`gScriptNet` on entry and cleared them on exit, so
+with two runs in flight whichever finished first unbound the other.
+
+There is no per-goroutine storage in MFL to hide that in, and an MFL-side
+registry keyed by run id would just be a global map holding arena-allocated
+strings -- the hazard of #648 again. So the context travels with the call
+instead: `bkn_js_eval` now takes `(db, name, net)`, C keeps them in that eval's
+own `BknRt` (already a per-call stack local) and hangs it on the context with
+`JS_SetContextOpaque`, and `js_host` passes them back on every host call. The
+MFL entry point is now `hostCall(op, argsJSON, db, name, net)` and there are no
+script globals at all.
+
+Verified under concurrency, one check per context field:
+
+- `db` -- 2916 requests at c=8 under ASan: no failures, no memory errors.
+- `name` -- two scripts logging their own identity, hammered together: 183 and
+  187 events, each attributed to the right script, **zero** mismatches over 370
+  concurrent runs.
+- `net` -- a script with no allow-net and one allowing `example.com`, run
+  concurrently: 40/40 refused and 12/12 reached. No leak across that boundary,
+  which is the one where a leak would be a security bug.
+
+Clean at c=1 through c=16 with zero non-2xx, and the gate passes 113 of 113 on
+two consecutive runs.
+
+While widening the extern, a latent signature mismatch surfaced and is also
+fixed: MFL emits `int` as `int64_t`, so `bkn_js_eval`'s `timeout_ms` and
+`mem_bytes` had been declared `int` on the C side since the bridge was written.
+It worked only because the values are small and each argument had its own
+register -- a mismatch across translation units that no linker will catch.
+
+### machin's `--race-safe` does not see framework-spawned goroutines
+
+`machin build --race-safe` refuses to build when it infers a data race, and it
+does catch the direct case -- two literal `go writer(...)` statements writing one
+global are reported. It does not catch the same global written by an HTTP
+handler, though `serve` spawns a goroutine per connection (`mfl_go_run_1` in the
+emitted C, as the ASan trace above shows). Nine lines are enough:
+
+```
+var hits = []int{}
+
+func main() {
+  serve(48711, func(req) {
+    hits = []int{}
+    hits = append(hits, 1)
+    return response("200", "text/plain", "ok")
+  })
+}
+```
+
+`machin build --race-safe` builds this without complaint. The whole of
+machin-bkn also builds clean under `--race-safe`, which is how the ULID bug
+survived to be found by a benchmark instead.
+
 ### Surface divergences found while building the harness
 
 The sandbox differs from the Go build's in ways the gate could not see, because

@@ -78,7 +78,7 @@ func runCLI(a) (code) {
       }
       if a[3] == "list" {
         nss := listNs(db)
-        println("{\"ok\":true,\"count\":" + str(countArray(nss)) + ",\"namespaces\":" + nss + "}")
+        println("{\"ok\":true,\"count\":" + str(countArray(db, nss)) + ",\"namespaces\":" + nss + "}")
         return
       }
       if a[3] == "delete" {
@@ -286,6 +286,352 @@ func runCLI(a) (code) {
     }
   }
 
+  // --- the read side ------------------------------------------------------
+  // The CLI carried only what the acceptance runbook needed, which is the write
+  // half. `bkn help-json` exists so an agent can discover the surface, and the
+  // read commands exist because "the CLI is the API" is the model this tool
+  // claims -- a verb available over HTTP should be a subcommand too.
+
+  if a[1] == "version" {
+    println("{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":\"0.1.0-mfl\",\"version\":\"1.0\"}")
+    return
+  }
+
+  if a[1] == "help-json" {
+    println(helpJSON())
+    return
+  }
+
+  if a[1] == "store" {
+    if a[2] == "get" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      rec, found := getDoc(db, ns, coll, a[4])
+      if !found { println(cliErr("record not found"))  code = 81  return }
+      println("{\"ok\":true,\"record\":" + rec + "}")
+      return
+    }
+    if a[2] == "list" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      limit := 50
+      offset := 0
+      order := ""
+      dir := "asc"
+      filters := []Filter{}
+      i := 4
+      while i < len(a) {
+        if a[i] == "--limit" { if i+1 < len(a) { if looksNumeric(a[i+1]) { limit = int(parse(a[i+1], 0)) } } }
+        if a[i] == "--offset" { if i+1 < len(a) { if looksNumeric(a[i+1]) { offset = int(parse(a[i+1], 0)) } } }
+        if a[i] == "--order-by" {
+          if i+1 < len(a) {
+            order = a[i+1]
+            colon := index(order, ":")
+            if colon > 0 {
+              dir = substr(order, colon + 1, len(order))
+              order = substr(order, 0, colon)
+            }
+          }
+        }
+        if a[i] == "--where" { if i+1 < len(a) { filters = appendWhere(db, ns, coll, filters, a[i+1]) } }
+        i = i + 1
+      }
+      // The CLI spells direction the other way round from HTTP: --order-by
+      // <field> is ascending and <field>:desc is not.
+      desc := dir == "desc"
+      records := listJSON(db, ns, coll, filters, order, desc, limit, offset)
+      total := countDocs(db, ns, coll, filters)
+      println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"count\":" + str(countArray(db, records)) + ",\"total\":" + str(total) + ",\"records\":" + records + "}")
+      return
+    }
+    if a[2] == "find" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      filters := []Filter{}
+      i := 4
+      while i < len(a) {
+        if a[i] == "--where" { if i+1 < len(a) { filters = appendWhere(db, ns, coll, filters, a[i+1]) } }
+        i = i + 1
+      }
+      rec, found := findDoc(db, ns, coll, filters)
+      if !found { println(cliErr("record not found"))  code = 81  return }
+      println("{\"ok\":true,\"record\":" + rec + "}")
+      return
+    }
+    if a[2] == "collections" {
+      nsFilter := ""
+      i := 3
+      while i < len(a) {
+        if a[i] == "--ns" { if i+1 < len(a) { nsFilter = a[i+1] } }
+        i = i + 1
+      }
+      println("{\"ok\":true,\"collections\":" + listCollections(db, nsFilter) + "}")
+      return
+    }
+  }
+
+  if a[1] == "files" {
+    if a[2] == "list" {
+      body, count := listFiles(db, a[3], 100, 0)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"files\":" + body + "}")
+      return
+    }
+    if a[2] == "show" {
+      f, found := findFile(db, a[3], a[4])
+      if !found { println(cliErr("file not found"))  code = 81  return }
+      println("{\"ok\":true,\"file\":" + fileJSON(f) + "}")
+      return
+    }
+    if a[2] == "put" {
+      name := ""
+      ctype := ""
+      i := 5
+      while i < len(a) {
+        if a[i] == "--name" { if i+1 < len(a) { name = a[i+1] } }
+        if a[i] == "--content-type" { if i+1 < len(a) { ctype = a[i+1] } }
+        i = i + 1
+      }
+      if name == "" { name = baseName(a[4]) }
+      // Distinct name: `:=` is function-scoped here, and `body` is already a
+      // string elsewhere in runCLI.
+      fileBytes := read_file_bytes(a[4])
+      out, err, _ := putFile(db, a[3], name, fileBytes, ctype, "{}")
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"file\":" + out + "}")
+      return
+    }
+    if a[2] == "get" {
+      f, found := findFile(db, a[3], a[4])
+      if !found { println(cliErr("file not found"))  code = 81  return }
+      dest := ""
+      i := 5
+      while i < len(a) {
+        if a[i] == "--out" { if i+1 < len(a) { dest = a[i+1] } }
+        i = i + 1
+      }
+      getBytes := readBlob(f.sha256)
+      if dest == "" { dest = f.name }
+      write_file_bytes(dest, getBytes)
+      println("{\"ok\":true,\"file\":" + fileJSON(f) + ",\"written\":" + jsonQuote(dest) + "}")
+      return
+    }
+  }
+
+  if a[1] == "events" {
+    if a[2] == "list" {
+      since := ""
+      limit := 50
+      level := ""
+      i := 4
+      while i < len(a) {
+        if a[i] == "--since" { if i+1 < len(a) { since = a[i+1] } }
+        if a[i] == "--level" { if i+1 < len(a) { level = a[i+1] } }
+        if a[i] == "--limit" { if i+1 < len(a) { if looksNumeric(a[i+1]) { limit = int(parse(a[i+1], 0)) } } }
+        i = i + 1
+      }
+      body, count, err := listEvents(db, a[3], "", level, "", "", since, "", limit, 0)
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"events\":" + body + "}")
+      return
+    }
+    if a[2] == "stats" {
+      by := "type"
+      since := ""
+      i := 4
+      while i < len(a) {
+        if a[i] == "--by" { if i+1 < len(a) { by = a[i+1] } }
+        if a[i] == "--since" { if i+1 < len(a) { since = a[i+1] } }
+        i = i + 1
+      }
+      body, total, err := eventStats(db, a[3], by, since)
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"total\":" + str(total) + ",\"stats\":" + body + "}")
+      return
+    }
+  }
+
+  if a[1] == "script" {
+    if a[2] == "run" {
+      input := "{}"
+      i := 4
+      while i < len(a) {
+        if a[i] == "--input" {
+          if i+1 < len(a) {
+            if a[i+1] == "-" { input = read_stdin() } else { input = a[i+1] }
+            if has_prefix(input, "@") { input = read_file(substr(input, 1, len(input))) }
+          }
+        }
+        i = i + 1
+      }
+      value, err := runScript(db, a[3], input)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "},\"status\":\"error\"}")  code = 85  return }
+      println("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
+      return
+    }
+    if a[2] == "runs" {
+      limit := 20
+      i := 4
+      while i < len(a) {
+        if a[i] == "--limit" { if i+1 < len(a) { if looksNumeric(a[i+1]) { limit = int(parse(a[i+1], 0)) } } }
+        i = i + 1
+      }
+      body, count := listRuns(db, a[3], limit)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"runs\":" + body + "}")
+      return
+    }
+  }
+
+  if a[1] == "auth" {
+    if a[2] == "user" {
+      if a[3] == "list" {
+        body, total := listUsers(db, 50, 0)
+        println("{\"ok\":true,\"total\":" + str(total) + ",\"users\":" + body + "}")
+        return
+      }
+      if a[3] == "show" {
+        u, found := findUser(db, a[4])
+        if !found { println(cliErr("user not found"))  code = 81  return }
+        println("{\"ok\":true,\"user\":" + userJSON(u) + "}")
+        return
+      }
+    }
+    if a[2] == "org" {
+      if a[3] == "list" { println("{\"ok\":true,\"orgs\":" + listOrgs(db) + "}")  return }
+      if a[3] == "show" {
+        o, found := findOrg(db, a[4])
+        if !found { println(cliErr("organization not found"))  code = 81  return }
+        println("{\"ok\":true,\"org\":{\"id\":" + jsonQuote(o.id) + ",\"slug\":" + jsonQuote(o.slug) + ",\"name\":" + jsonQuote(o.name) + ",\"created_at\":" + jsonQuote(o.created_at) + "}}")
+        return
+      }
+    }
+    if a[2] == "member" {
+      if a[3] == "list" {
+        body, err := listMembers(db, a[4])
+        if err != "" { println(cliErr(err))  code = 81  return }
+        println("{\"ok\":true,\"members\":" + body + "}")
+        return
+      }
+    }
+    if a[2] == "memberships" {
+      u, found := findUser(db, a[3])
+      if !found { println(cliErr("user not found"))  code = 81  return }
+      body, count := membershipsOf(db, u.id)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"memberships\":" + body + "}")
+      return
+    }
+    if a[2] == "can" {
+      u, uFound := findUser(db, a[3])
+      if !uFound { println(cliErr("user not found"))  code = 81  return }
+      o, oFound := findOrg(db, a[4])
+      if !oFound { println(cliErr("organization not found"))  code = 81  return }
+      have, haveFound := membershipRole(db, o.id, u.id)
+      allowed := false
+      if haveFound { allowed = roleAtLeast(have, a[5]) }
+      if allowed { println("{\"ok\":true,\"allowed\":true}")  return }
+      println("{\"ok\":true,\"allowed\":false}")
+      return
+    }
+  }
+
   println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
   code = 80
+}
+
+func cliErr(msg) (s) { s = "{\"ok\":false,\"error\":{\"message\":" + jsonQuote(msg) + "}}" }
+
+func baseName(p) (n) {
+  n = p
+  i := len(p) - 1
+  while i >= 0 {
+    if substr(p, i, i+1) == "/" { n = substr(p, i+1, len(p))  return }
+    i = i - 1
+  }
+}
+
+// appendWhere parses one --where predicate into a Filter. The CLI spells them
+// field=value, field>value, field:in=a,b -- the same six operators the HTTP
+// query string uses, written the way a shell can pass without quoting games.
+// Values are passed through raw: whereClause applies the collection's
+// normalizers to filter values itself, so doing it here too would fold twice.
+func appendWhere(db, ns, coll, filters, expr) (out) {
+  out = filters
+  field := ""
+  op := "eq"
+  value := ""
+  colon := index(expr, ":in=")
+  if colon > 0 {
+    field = substr(expr, 0, colon)
+    op = "in"
+    value = substr(expr, colon + 4, len(expr))
+    out = append(out, Filter{field: field, op: op, value: value})
+    return
+  }
+  i := 0
+  while i < len(expr) {
+    c := substr(expr, i, i+1)
+    if c == "=" {
+      field = substr(expr, 0, i)
+      value = substr(expr, i+1, len(expr))
+      if len(field) > 0 {
+        last := substr(field, len(field)-1, len(field))
+        if last == "!" { op = "ne"  field = substr(field, 0, len(field)-1) }
+        if last == ">" { op = "gte" field = substr(field, 0, len(field)-1) }
+        if last == "<" { op = "lte" field = substr(field, 0, len(field)-1) }
+      }
+      out = append(out, Filter{field: field, op: op, value: value})
+      return
+    }
+    if c == ">" { field = substr(expr, 0, i)  op = "gt"  value = substr(expr, i+1, len(expr))
+      out = append(out, Filter{field: field, op: op, value: value})  return }
+    if c == "<" { field = substr(expr, 0, i)  op = "lt"  value = substr(expr, i+1, len(expr))
+      out = append(out, Filter{field: field, op: op, value: value})  return }
+    i = i + 1
+  }
+}
+
+// helpJSON is the machine-readable catalogue the agent-first contract asks for:
+// an agent discovers the surface here rather than by parsing help text.
+func helpJSON() (s) {
+  cmds := []string{}
+  cmds = append(cmds, "\"store put\":{\"args\":[\"ns/coll\"],\"flags\":[\"--id <id>\",\"--data <json|@file|->\"]}")
+  cmds = append(cmds, "\"store get\":{\"args\":[\"ns/coll\",\"id\"],\"flags\":[]}")
+  cmds = append(cmds, "\"store list\":{\"args\":[\"ns/coll\"],\"flags\":[\"--where <predicate>\",\"--order-by <field[:desc]>\",\"--limit <n>\",\"--offset <n>\"]}")
+  cmds = append(cmds, "\"store find\":{\"args\":[\"ns/coll\"],\"flags\":[\"--where <predicate>\"]}")
+  cmds = append(cmds, "\"store collections\":{\"args\":[],\"flags\":[\"--ns <namespace>\"]}")
+  cmds = append(cmds, "\"kv get\":{\"args\":[\"key\"],\"flags\":[]}")
+  cmds = append(cmds, "\"kv set\":{\"args\":[\"key\",\"value\"],\"flags\":[\"--type <string|json|encrypted>\",\"--public\"]}")
+  cmds = append(cmds, "\"kv list\":{\"args\":[],\"flags\":[\"--prefix <p>\"]}")
+  cmds = append(cmds, "\"auth user create\":{\"args\":[\"email\"],\"flags\":[\"--password-stdin\",\"--password <p>\",\"--name <n>\"]}")
+  cmds = append(cmds, "\"auth user list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"auth user show\":{\"args\":[\"email|id\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth org create\":{\"args\":[\"slug\"],\"flags\":[\"--name <n>\"]}")
+  cmds = append(cmds, "\"auth org list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"auth org show\":{\"args\":[\"slug|id\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth member add\":{\"args\":[\"org\",\"user\"],\"flags\":[\"--role <owner|admin|member>\"]}")
+  cmds = append(cmds, "\"auth member list\":{\"args\":[\"org\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth memberships\":{\"args\":[\"user\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth can\":{\"args\":[\"user\",\"org\",\"min-role\"],\"flags\":[]}")
+  cmds = append(cmds, "\"files ns create\":{\"args\":[\"name\"],\"flags\":[\"--allow-type <t>\",\"--public\"]}")
+  cmds = append(cmds, "\"files ns list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"files put\":{\"args\":[\"ns\",\"path\"],\"flags\":[\"--name <n>\",\"--content-type <t>\"]}")
+  cmds = append(cmds, "\"files get\":{\"args\":[\"ns\",\"name\"],\"flags\":[\"--out <path>\"]}")
+  cmds = append(cmds, "\"files show\":{\"args\":[\"ns\",\"name\"],\"flags\":[]}")
+  cmds = append(cmds, "\"files list\":{\"args\":[\"ns\"],\"flags\":[]}")
+  cmds = append(cmds, "\"events emit\":{\"args\":[\"stream\",\"type\"],\"flags\":[\"--level <l>\",\"--subject <s>\",\"--data <json>\"]}")
+  cmds = append(cmds, "\"events list\":{\"args\":[\"stream\"],\"flags\":[\"--level <l>\",\"--since <age>\",\"--limit <n>\"]}")
+  cmds = append(cmds, "\"events stats\":{\"args\":[\"stream\"],\"flags\":[\"--by <type|level|source|subject>\",\"--since <age>\"]}")
+  cmds = append(cmds, "\"script create\":{\"args\":[\"name\"],\"flags\":[\"--file <path>\",\"--allow-net <hosts>\",\"--timeout <ms>\"]}")
+  cmds = append(cmds, "\"script run\":{\"args\":[\"name\"],\"flags\":[\"--input <json|@file|->\"]}")
+  cmds = append(cmds, "\"script runs\":{\"args\":[\"name\"],\"flags\":[\"--limit <n>\"]}")
+  cmds = append(cmds, "\"script list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"hooks create\":{\"args\":[\"name\"],\"flags\":[\"--script <s>\",\"--allow-origin <o>\",\"--rate-limit <n>\"]}")
+  cmds = append(cmds, "\"hooks list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"cron create\":{\"args\":[\"name\"],\"flags\":[\"--schedule <expr>\",\"--script <s>\"]}")
+  cmds = append(cmds, "\"cron list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"cron tick\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"lock list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"serve\":{\"args\":[],\"flags\":[\"--host <h>\",\"--port <n>\"]}")
+  cmds = append(cmds, "\"version\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"help-json\":{\"args\":[],\"flags\":[]}")
+  s = "{\"ok\":true,\"version\":\"1.0\",\"exit_codes\":{\"0\":\"ok\",\"80\":\"unknown command\",\"81\":\"not found\",\"85\":\"validation error\",\"110\":\"datastore unavailable\"},\"commands\":{" + join(cmds, ",") + "}}"
 }
