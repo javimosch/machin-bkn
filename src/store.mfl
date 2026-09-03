@@ -20,6 +20,7 @@ func storeOpen(path) (db) {
   sqlite_exec(db, eventsSchema())
   sqlite_exec(db, cronSchema())
   sqlite_exec(db, scriptSchema())
+  sqlite_exec(db, hooksSchema())
 }
 
 func nowStamp() (s) { s = time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ") }

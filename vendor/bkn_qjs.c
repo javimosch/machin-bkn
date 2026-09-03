@@ -48,6 +48,11 @@ static JSValue js_host(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
 // The prelude is the sandbox's whole visible surface. Anything not named here
 // simply does not exist inside a script: there is no module loader, no
 // filesystem, no process, and no network except through http.
+// The prelude is the sandbox's whole visible surface. Anything not named here
+// simply does not exist inside a script: there is no module loader, no
+// filesystem, no process, and no network except through http. The names match
+// the published guide exactly — a script written against the documentation
+// has to run here unchanged, or the port is not a port.
 static const char *BKN_PRELUDE =
 "globalThis.__logs = [];\n"
 "function __call(op, args) {\n"
@@ -63,15 +68,17 @@ static const char *BKN_PRELUDE =
 "var log = { info: function (m, d) { __call('log', ['info', m, d || null]); },\n"
 "            warn: function (m, d) { __call('log', ['warn', m, d || null]); },\n"
 "            error: function (m, d) { __call('log', ['error', m, d || null]); } };\n"
-"var crypto = { hmacSha256: function (k, m) { return __call('crypto.hmacSha256', [k, m]); },\n"
-"               sha256: function (m) { return __call('crypto.sha256', [m]); },\n"
-"               randomHex: function (n) { return __call('crypto.randomHex', [n || 16]); },\n"
-"               timingSafeEqual: function (a, b) { return __call('crypto.timingSafeEqual', [a, b]); } };\n"
+"var crypto = {\n"
+"  hmac: function (k, m) { return __call('crypto.hmac', [k, m]); },\n"
+"  sha256: function (m) { return __call('crypto.sha256', [m]); },\n"
+"  equal: function (a, b) { return __call('crypto.equal', [a, b]); },\n"
+"  randomHex: function (n) { return __call('crypto.randomHex', [n || 16]); } };\n"
 "var id = { new: function () { return __call('id.new', []); } };\n"
 "function now(unit) { return __call('now', [unit || 'iso']); }\n"
 "var store = {\n"
 "  get: function (ref, i) { return __call('store.get', [ref, i]); },\n"
 "  put: function (ref, doc, i) { return __call('store.put', [ref, doc, i || '']); },\n"
+"  putIfAbsent: function (ref, doc, i) { return __call('store.putIfAbsent', [ref, doc, i || '']); },\n"
 "  patch: function (ref, i, doc) { return __call('store.patch', [ref, i, doc]); },\n"
 "  delete: function (ref, i) { return __call('store.delete', [ref, i]); },\n"
 "  list: function (ref, o) { return __call('store.list', [ref, o || {}]); },\n"
@@ -84,7 +91,8 @@ static const char *BKN_PRELUDE =
 "  list: function (p) { return __call('kv.list', [p || '']); } };\n"
 "var events = {\n"
 "  emit: function (s, t, o) { return __call('events.emit', [s, t, o || {}]); },\n"
-"  list: function (s, o) { return __call('events.list', [s, o || {}]); } };\n"
+"  list: function (s, o) { return __call('events.list', [s, o || {}]); },\n"
+"  prune: function (s, older) { return __call('events.prune', [s, older]); } };\n"
 "var files = {\n"
 "  put: function (ns, n, b, c) { return __call('files.put', [ns, n, b, c || '']); },\n"
 "  get: function (ns, n) { return __call('files.get', [ns, n]); },\n"
@@ -92,8 +100,8 @@ static const char *BKN_PRELUDE =
 "  delete: function (ns, n) { return __call('files.delete', [ns, n]); } };\n"
 "var http = { fetch: function (u, o) { return __call('http.fetch', [u, o || {}]); } };\n"
 "var lock = {\n"
-"  acquire: function (k, t) { return __call('lock.acquire', [k, t || '30s']); },\n"
-"  release: function (k, o) { return __call('lock.release', [k, o]); } };\n"
+"  acquire: function (k, ttl) { return __call('lock.acquire', [k, ttl || 300]); },\n"
+"  release: function (k, owner) { return __call('lock.release', [k, owner]); } };\n"
 "var auth = {\n"
 "  me: function (t) { return __call('auth.me', [t]); },\n"
 "  can: function (u, o, r) { return __call('auth.can', [u, o, r]); } };\n"
@@ -173,7 +181,7 @@ char *bkn_js_eval(const char *source, const char *input, int timeout_ms, int mem
 
     if (!out) {
         JSValue g = JS_GetGlobalObject(ctx);
-        JSValue h = JS_GetPropertyStr(ctx, g, "handler");
+        JSValue h = JS_GetPropertyStr(ctx, g, "main");
         if (!JS_IsFunction(ctx, h)) {
             out = strdup("{\"ok\":false,\"error\":\"the script defines no handler(input) function\"}");
         } else {

@@ -110,6 +110,7 @@ func listRuns(db, name, limit) (out, count) {
 
 var gScriptDB = 0
 var gScriptName = ""
+var gScriptNet = ""
 
 func argAt(argsJSON, i) (out) {
   out = ""
@@ -137,7 +138,7 @@ export func hostCall(op, argsJSON) (out) {
   db := gScriptDB
   if db == 0 { out = hostErr("no datastore bound to this run")  return }
 
-  if op == "crypto.hmacSha256" { out = hostOK(jsonQuote(hmac_sha256(argAt(argsJSON, 0), argAt(argsJSON, 1))))  return }
+  if op == "crypto.hmac" { out = hostOK(jsonQuote(hmac_sha256(argAt(argsJSON, 0), argAt(argsJSON, 1))))  return }
   if op == "crypto.sha256" { out = hostOK(jsonQuote(sha256(argAt(argsJSON, 0))))  return }
   if op == "crypto.randomHex" {
     n := 16
@@ -149,7 +150,7 @@ export func hostCall(op, argsJSON) (out) {
   }
   // Compared without an early exit, so the answer takes the same time
   // whatever the inputs are — the whole point of offering it at all.
-  if op == "crypto.timingSafeEqual" {
+  if op == "crypto.equal" {
     a := argAt(argsJSON, 0)
     b := argAt(argsJSON, 1)
     same := 0
@@ -197,11 +198,18 @@ export func hostCall(op, argsJSON) (out) {
     return
   }
 
+  // A script asked for a setting, not a row about a setting: kv.get returns
+  // the value. A json entry comes back as the object it holds; everything
+  // else as a string.
   if op == "kv.get" {
-    v, found, err := kvGet(db, argAt(argsJSON, 0))
+    entry, found, err := kvGet(db, argAt(argsJSON, 0))
     if err != "" { out = hostErr(err)  return }
     if !found { out = hostOK("null")  return }
-    out = hostOK(v)
+    kind := jsonField(entry, ".type")
+    value, vErr := json_get(entry, ".value")
+    if vErr != "" { out = hostOK("null")  return }
+    if kind == "json" { out = hostOK(unescape(unquote(value)))  return }
+    out = hostOK(value)
     return
   }
   if op == "kv.set" {
@@ -221,7 +229,175 @@ export func hostCall(op, argsJSON) (out) {
   }
   if op == "kv.list" { out = hostOK(kvList(db, argAt(argsJSON, 0), false))  return }
 
+  if op == "store.get" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    doc, found := getDoc(db, ns, coll, argAt(argsJSON, 1))
+    if !found { out = hostOK("null")  return }
+    out = hostOK(doc)
+    return
+  }
+  if op == "store.put" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    doc, err := putDoc(db, ns, coll, argAt(argsJSON, 2), argRaw(argsJSON, 1))
+    if err != "" { out = hostErr(err)  return }
+    out = hostOK(doc)
+    return
+  }
+  // putIfAbsent answers null when the id was already there. That is what
+  // makes a webhook retry safe: the second delivery is distinguishable from
+  // the first without a read-then-write race.
+  if op == "store.putIfAbsent" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    doc, created, err := putIfAbsent(db, ns, coll, argAt(argsJSON, 2), argRaw(argsJSON, 1))
+    if err != "" { out = hostErr(err)  return }
+    if !created { out = hostOK("null")  return }
+    out = hostOK(doc)
+    return
+  }
+  if op == "store.patch" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    doc, found, err := patchDoc(db, ns, coll, argAt(argsJSON, 1), argRaw(argsJSON, 2))
+    if err != "" { out = hostErr(err)  return }
+    if !found { out = hostOK("null")  return }
+    out = hostOK(doc)
+    return
+  }
+  if op == "store.delete" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    if deleteDoc(db, ns, coll, argAt(argsJSON, 1)) { out = hostOK("true") } else { out = hostOK("false") }
+    return
+  }
+  if op == "store.list" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    opts := argRaw(argsJSON, 1)
+    out = hostOK(listJSON(db, ns, coll, optFilters(db, opts), jsonField(opts, ".order_by"), jsonField(opts, ".order") != "asc", optInt(opts, ".limit", 50), optInt(opts, ".offset", 0)))
+    return
+  }
+  if op == "store.find" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    doc, found := findDoc(db, ns, coll, optFilters(db, argRaw(argsJSON, 1)))
+    if !found { out = hostOK("null")  return }
+    out = hostOK(doc)
+    return
+  }
+  if op == "store.count" {
+    ns, coll, refErr := splitRef(argAt(argsJSON, 0))
+    if refErr != "" { out = hostErr(refErr)  return }
+    out = hostOK(str(countDocs(db, ns, coll, optFilters(db, argRaw(argsJSON, 1)))))
+    return
+  }
+
+  if op == "events.prune" {
+    removed, err := pruneEvents(db, argAt(argsJSON, 1), argAt(argsJSON, 0))
+    if err != "" { out = hostErr(err)  return }
+    out = hostOK(str(removed))
+    return
+  }
+  if op == "events.list" {
+    opts := argRaw(argsJSON, 1)
+    evts, _, err := listEvents(db, argAt(argsJSON, 0), jsonField(opts, ".type"), jsonField(opts, ".level"), jsonField(opts, ".source"), jsonField(opts, ".subject"), jsonField(opts, ".since"), jsonField(opts, ".until"), optInt(opts, ".limit", 50), optInt(opts, ".offset", 0))
+    if err != "" { out = hostErr(err)  return }
+    out = hostOK(evts)
+    return
+  }
+
+  if op == "lock.acquire" {
+    ttl := 300
+    if looksNumeric(argRaw(argsJSON, 1)) { ttl = int(parse(argRaw(argsJSON, 1), 0)) }
+    owner, ok := acquireLock(db, argAt(argsJSON, 0), ttl)
+    if !ok { out = hostOK("null")  return }
+    out = hostOK("{\"key\":" + jsonQuote(argAt(argsJSON, 0)) + ",\"owner\":" + jsonQuote(owner) + "}")
+    return
+  }
+  if op == "lock.release" {
+    if releaseLock(db, argAt(argsJSON, 0), argAt(argsJSON, 1)) { out = hostOK("true") } else { out = hostOK("false") }
+    return
+  }
+
+  // The only way out of the sandbox. A script may reach the network solely
+  // through here, and only to a host its allow-net list names.
+  if op == "http.fetch" {
+    url := argAt(argsJSON, 0)
+    if !netAllowed(gScriptNet, url) { out = hostErr("host is not in this script's allow-net list: " + url)  return }
+    opts := argRaw(argsJSON, 1)
+    method := jsonField(opts, ".method")
+    if method == "" { method = "GET" }
+    body, bodyErr := json_get(opts, ".body")
+    if bodyErr != "" { body = "" }
+    if method == "GET" {
+      out = hostOK(jsonQuote(https_get(url)))
+      return
+    }
+    out = hostOK(jsonQuote(https_post(url, body)))
+    return
+  }
+
   out = hostErr("unknown host capability: " + op)
+}
+
+// optFilters turns a script's { where: { field: value } } into the same
+// filter list the HTTP surface builds, so a query means the same thing from
+// either side.
+func optFilters(db, opts) (out) {
+  out = []Filter{}
+  where, err := json_get(opts, ".where")
+  if err != "" { return }
+  // MFL has no way to enumerate a JSON object's keys, so SQLite's json_each
+  // does it. Only `key` is selected: json_each's `value` column is the SQL
+  // value for scalars, which json() then refuses for strings.
+  rows := sqlite_query(db, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{where})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  i := 0
+  while i < len(parsed) {
+    k := parsed[i].k
+    v, e := json_get(where, "." + k)
+    if e == "" {
+      raw := unescape(unquote(v))
+      op := "eq"
+      value := raw
+      colon := index(raw, ":")
+      if colon > 0 {
+        candidate := substr(raw, 0, colon)
+        if isOperator(candidate) {
+          op = candidate
+          value = substr(raw, colon+1, len(raw))
+        }
+      }
+      out = append(out, Filter{field: k, op: op, value: value})
+    }
+    i = i + 1
+  }
+}
+
+func optInt(opts, path, fallback) (n) {
+  n = fallback
+  v, e := json_get(opts, path)
+  if e != "" { return }
+  if looksNumeric(v) { n = int(parse(v, 0)) }
+}
+
+// netAllowed: an empty list means no network at all. Reaching out is opt-in
+// per script, named host by named host.
+func netAllowed(csv, url) (ok) {
+  ok = false
+  if csv == "" { return }
+  hostPart := url
+  if has_prefix(hostPart, "https://") { hostPart = substr(hostPart, 8, len(hostPart)) }
+  if has_prefix(hostPart, "http://") { hostPart = substr(hostPart, 7, len(hostPart)) }
+  slash := index(hostPart, "/")
+  if slash > 0 { hostPart = substr(hostPart, 0, slash) }
+  for _, h := range split(csv, ",") {
+    if trim(h) == hostPart { ok = true  return }
+    if trim(h) == "*" { ok = true  return }
+  }
 }
 
 // runScript evaluates a stored script. The registry, the history and the
@@ -237,11 +413,13 @@ func runScript(db, name, input) (value, err) {
 
   gScriptDB = db
   gScriptName = name
+  gScriptNet = s.allow_net
   started := now_ms()
   raw := bkn_js_eval(s.source, input, s.timeout_ms, 0)
   took := now_ms() - started
   gScriptDB = 0
   gScriptName = ""
+  gScriptNet = ""
 
   ok, _ := json_get(raw, ".ok")
   logs, logErr := json_get(raw, ".logs")

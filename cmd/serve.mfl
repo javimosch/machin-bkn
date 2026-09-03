@@ -152,6 +152,117 @@ func authRoutes(req, q, segs) (res) {
   res = errRes("404 Not Found", "not_found", "no such route")
 }
 
+// headersJSON serializes the request headers for the script. MFL cannot
+// enumerate a JSON object, but machweb hands us a real map, so this is the
+// one place the header set is turned into JSON by hand.
+func headersJSON(req) (out) {
+  parts := []string{}
+  for _, k := range keys(req.headers) {
+    parts = append(parts, jsonQuote(k) + ":" + jsonQuote(req.headers[k]))
+  }
+  out = "{" + join(parts, ",") + "}"
+}
+
+func clientIP(req) (ip) {
+  ip = header(req, "x-forwarded-for")
+  comma := index(ip, ",")
+  if comma > 0 { ip = substr(ip, 0, comma) }
+  ip = trim(ip)
+  if ip == "" { ip = header(req, "x-real-ip") }
+  if ip == "" { ip = "local" }
+}
+
+// hooksRoutes is the only unauthenticated write path in the server. A hook
+// hands the request to a script and returns whatever the script decided.
+func hooksRoutes(req, q, segs) (res) {
+  name := segs[2]
+  h, found := findHook(gDB, name)
+  if !found { res = errRes("404 Not Found", "not_found", "no such hook")  return }
+  if h.enabled != 1 { res = errRes("404 Not Found", "not_found", "no such hook")  return }
+
+  origin := header(req, "origin")
+
+  // Only the preflight is handled for us; every other method reaches the
+  // script, which branches on d.method.
+  if req.method == "OPTIONS" {
+    if !originAllowed(h.allow_origin, origin) {
+      res = errRes("403 Forbidden", "origin_refused", "origin is not allowed for this hook")
+      return
+    }
+    r := response("204 No Content", "text/plain", "")
+    r = with_header(r, "Access-Control-Allow-Origin", origin)
+    r = with_header(r, "Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    r = with_header(r, "Access-Control-Allow-Headers", "Content-Type, Authorization")
+    r = with_header(r, "Access-Control-Max-Age", "600")
+    res = r
+    return
+  }
+
+  if h.max_bytes > 0 {
+    if len(req.body_bytes) > h.max_bytes {
+      res = errRes("413 Payload Too Large", "too_large", "body exceeds this hook's limit of " + str(h.max_bytes) + " bytes")
+      return
+    }
+  }
+  if !rateOK(gDB, name, clientIP(req), h.rate_limit) {
+    res = errRes("429 Too Many Requests", "rate_limited", "too many requests for this hook")
+    return
+  }
+
+  // The body reaches the script byte for byte. A signature covers exact
+  // bytes, so re-serializing before hashing would break every provider.
+  d := "{\"method\":" + jsonQuote(req.method) + ",\"path\":" + jsonQuote(pathOnly(req.path)) + ",\"query\":" + queryJSON(q) + ",\"headers\":" + headersJSON(req) + ",\"body\":" + jsonQuote(req.body) + ",\"body_base64\":" + jsonQuote(base64_encode_bytes(req.body_bytes)) + ",\"ip\":" + jsonQuote(clientIP(req)) + "}"
+
+  value, err := runScript(gDB, h.script, d)
+  if err != "" {
+    // A throwing hook answers 500 so the provider retries.
+    res = jsonRes("500 Internal Server Error", "{\"ok\":false,\"error\":{\"type\":\"script_error\",\"message\":" + jsonQuote(err) + "}}")
+    return
+  }
+
+  status := "200 OK"
+  st, stErr := json_get(value, ".status")
+  if stErr == "" { status = statusLine(st) }
+  ctype := jsonField(value, ".content_type")
+  if ctype == "" { ctype = "application/json" }
+  body, bodyErr := json_get(value, ".body")
+  if bodyErr != "" { body = value }
+
+  // A string body with a non-JSON content type is written verbatim, so a CSV
+  // stays a CSV; anything else is JSON.
+  r := response(status, ctype, body)
+  if has_prefix(body, "\"") {
+    if index(ctype, "json") < 0 { r = response(status, ctype, unescape(unquote(body))) }
+  }
+  if originAllowed(h.allow_origin, origin) { r = with_header(r, "Access-Control-Allow-Origin", origin) }
+  res = r
+}
+
+func queryJSON(q) (out) {
+  parts := []string{}
+  i := 0
+  while i < len(q.keys) {
+    parts = append(parts, jsonQuote(q.keys[i]) + ":" + jsonQuote(q.vals[i]))
+    i = i + 1
+  }
+  out = "{" + join(parts, ",") + "}"
+}
+
+func statusLine(code) (s) {
+  s = "200 OK"
+  if code == "201" { s = "201 Created" }
+  if code == "202" { s = "202 Accepted" }
+  if code == "204" { s = "204 No Content" }
+  if code == "400" { s = "400 Bad Request" }
+  if code == "401" { s = "401 Unauthorized" }
+  if code == "403" { s = "403 Forbidden" }
+  if code == "404" { s = "404 Not Found" }
+  if code == "409" { s = "409 Conflict" }
+  if code == "422" { s = "422 Unprocessable Entity" }
+  if code == "429" { s = "429 Too Many Requests" }
+  if code == "500" { s = "500 Internal Server Error" }
+}
+
 func eventsRoutes(req, q, segs) (res) {
   if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
 
@@ -412,6 +523,10 @@ func handle(req) (res) {
 
   if len(segs) >= 2 {
     if segs[0] == "v1" {
+      if segs[1] == "hooks" {
+        res = hooksRoutes(req, q, segs)
+        return
+      }
       if segs[1] == "events" {
         res = eventsRoutes(req, q, segs)
         return

@@ -192,6 +192,100 @@ func runCLI(a) (code) {
     }
   }
 
+  if a[1] == "hooks" {
+    if a[2] == "create" {
+      script := ""
+      maxBytes := 0
+      rate := 0
+      origins := []string{}
+      i := 4
+      while i < len(a) {
+        if a[i] == "--script" { if i+1 < len(a) { script = a[i+1] } }
+        if a[i] == "--max-bytes" { if i+1 < len(a) { maxBytes = parse_int(a[i+1]) } }
+        if a[i] == "--rate-limit" { if i+1 < len(a) { rate = parse_int(a[i+1]) } }
+        if a[i] == "--allow-origin" { if i+1 < len(a) { origins = append(origins, a[i+1]) } }
+        i = i + 1
+      }
+      out, err := createHook(db, a[3], script, maxBytes, join(origins, ","), rate)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"hook\":" + out + "}")
+      return
+    }
+    if a[2] == "list" {
+      hooks, count := listHooks(db)
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"hooks\":" + hooks + "}")
+      return
+    }
+    if a[2] == "delete" {
+      err := deleteHook(db, a[3])
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"deleted\":true}")
+      return
+    }
+  }
+
+  if a[1] == "lock" {
+    if a[2] == "list" {
+      println("{\"ok\":true,\"locks\":" + listLocks(db) + "}")
+      return
+    }
+  }
+
+  if a[1] == "kv" {
+    if a[2] == "set" {
+      kind := "string"
+      description := ""
+      public := false
+      i := 5
+      while i < len(a) {
+        if a[i] == "--type" { if i+1 < len(a) { kind = a[i+1] } }
+        if a[i] == "--description" { if i+1 < len(a) { description = a[i+1] } }
+        if a[i] == "--public" { public = true }
+        i = i + 1
+      }
+      out, err := kvSet(db, a[3], a[4], kind, description, public)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"entry\":" + out + "}")
+      return
+    }
+    if a[2] == "get" {
+      entry, found, err := kvGet(db, a[3])
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      if !found { println("{\"ok\":false,\"error\":{\"message\":\"key not found\"}}")  code = 84  return }
+      println("{\"ok\":true,\"entry\":" + entry + "}")
+      return
+    }
+    if a[2] == "list" {
+      println("{\"ok\":true,\"entries\":" + kvList(db, "", false) + "}")
+      return
+    }
+  }
+
+  if a[1] == "store" {
+    if a[2] == "put" {
+      ref := a[3]
+      explicit := ""
+      data := "{}"
+      i := 4
+      while i < len(a) {
+        if a[i] == "--id" { if i+1 < len(a) { explicit = a[i+1] } }
+        if a[i] == "--data" {
+          if i+1 < len(a) {
+            if a[i+1] == "-" { data = read_stdin() } else { data = a[i+1] }
+            if has_prefix(data, "@") { data = read_file(substr(data, 1, len(data))) }
+          }
+        }
+        i = i + 1
+      }
+      ns, coll, refErr := splitRef(ref)
+      if refErr != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(refErr) + "}}")  code = 85  return }
+      out, err := putDoc(db, ns, coll, explicit, data)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"record\":" + out + "}")
+      return
+    }
+  }
+
   println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
   code = 80
 }

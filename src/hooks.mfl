@@ -1,0 +1,141 @@
+// hooks — the public edge.
+//
+// A hook is an unauthenticated HTTP endpoint that hands a request to a
+// script. That is the whole feature: a Stripe webhook, a form post and a CSV
+// export are all scripts behind hooks, not core code. It is what keeps the
+// core small enough to change.
+//
+// Being unauthenticated is the reason for the two guards here. A rate limit
+// is per client IP per minute and honours X-Forwarded-For, so a proxy does
+// not make it global. An origin allow-list decides which browsers may preflight
+// at all; a provider webhook needs none.
+
+func hooksSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS hooks (name TEXT PRIMARY KEY, script TEXT NOT NULL, max_bytes INTEGER NOT NULL DEFAULT 0, allow_origin TEXT NOT NULL DEFAULT '', rate_limit INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_hits (hook TEXT NOT NULL, ip TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hook, ip, minute)); CREATE TABLE IF NOT EXISTS locks (key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);"
+}
+
+type HookRow struct { name string  script string  max_bytes int  allow_origin string  rate_limit int  enabled int  created_at string  updated_at string }
+
+func hookJSON(h) (s) {
+  s = "{\"name\":" + jsonQuote(h.name) + ",\"script\":" + jsonQuote(h.script) + ",\"max_bytes\":" + str(h.max_bytes) + ",\"allow_origin\":" + typeListJSON(h.allow_origin) + ",\"rate_limit\":" + str(h.rate_limit) + ",\"enabled\":"
+  if h.enabled == 1 { s = s + "true" } else { s = s + "false" }
+  s = s + ",\"created_at\":" + jsonQuote(h.created_at) + ",\"updated_at\":" + jsonQuote(h.updated_at) + "}"
+}
+
+func hookColumns() (s) { s = "SELECT name, script, max_bytes, allow_origin, rate_limit, enabled, created_at, updated_at FROM hooks" }
+
+func createHook(db, name, script, maxBytes, allowOrigin, rateLimit) (out, err) {
+  out = ""
+  err = ""
+  if !validSegment(name) { err = "hook name must be lowercase and start with a letter"  return }
+  if script == "" { err = "a hook must name a script"  return }
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO hooks (name, script, max_bytes, allow_origin, rate_limit, enabled, created_at, updated_at) VALUES (?,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),1,?,?) ON CONFLICT(name) DO UPDATE SET script = excluded.script, max_bytes = excluded.max_bytes, allow_origin = excluded.allow_origin, rate_limit = excluded.rate_limit, updated_at = excluded.updated_at", []string{name, script, str(maxBytes), allowOrigin, str(rateLimit), stamp, stamp})
+  h, _ := findHook(db, name)
+  out = hookJSON(h)
+}
+
+func findHook(db, name) (h, found) {
+  h = HookRow{name: "", script: "", max_bytes: 0, allow_origin: "", rate_limit: 0, enabled: 0, created_at: "", updated_at: ""}
+  found = false
+  rows := sqlite_query(db, hookColumns() + " WHERE name = ?", []string{name})
+  if rows == "[]" { return }
+  parsed := parse(rows, []HookRow{})
+  if len(parsed) == 0 { return }
+  h = parsed[0]
+  found = true
+}
+
+func listHooks(db) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, hookColumns() + " ORDER BY name")
+  if rows == "[]" { return }
+  parsed := parse(rows, []HookRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, hookJSON(parsed[i]))
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+func deleteHook(db, name) (err) {
+  err = ""
+  _, found := findHook(db, name)
+  if !found { err = "hook not found"  return }
+  sqlite_exec(db, "DELETE FROM hooks WHERE name = ?", []string{name})
+}
+
+func originAllowed(csv, origin) (ok) {
+  ok = false
+  if origin == "" { return }
+  for _, o := range split(csv, ",") {
+    if trim(o) == origin { ok = true  return }
+  }
+}
+
+// rateOK counts one hit and says whether the caller is still under the limit.
+// The counter is keyed by the minute, so old rows stop mattering on their own
+// rather than needing a sweep.
+func rateOK(db, name, ip, limit) (ok) {
+  ok = true
+  if limit <= 0 { return }
+  minute := str(now() / 60)
+  sqlite_exec(db, "INSERT INTO hook_hits (hook, ip, minute, n) VALUES (?,?,CAST(? AS INTEGER),1) ON CONFLICT(hook, ip, minute) DO UPDATE SET n = n + 1", []string{name, ip, minute})
+  rows := sqlite_query(db, "SELECT '' AS k, n FROM hook_hits WHERE hook = ? AND ip = ? AND minute = CAST(? AS INTEGER)", []string{name, ip, minute})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  if len(parsed) == 0 { return }
+  if parsed[0].n > limit { ok = false }
+}
+
+// --- locks ----------------------------------------------------------------
+//
+// A lock is advisory and always expires. A script that dies holding one must
+// not be able to wedge a job forever, so there is no way to take one without
+// a TTL.
+
+func acquireLock(db, key, ttl) (owner, ok) {
+  owner = ""
+  ok = false
+  if ttl <= 0 { ttl = 300 }
+  ts := now()
+  sqlite_exec(db, "DELETE FROM locks WHERE expires_at <= CAST(? AS INTEGER)", []string{str(ts)})
+  candidate := newID()
+  sqlite_exec(db, "INSERT OR IGNORE INTO locks (key, owner, expires_at, created_at) VALUES (?,?,CAST(? AS INTEGER),?)", []string{key, candidate, str(ts + ttl), nowStamp()})
+  rows := sqlite_query(db, "SELECT owner AS k, 0 AS n FROM locks WHERE key = ?", []string{key})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  if len(parsed) == 0 { return }
+  if parsed[0].k != candidate { return }
+  owner = candidate
+  ok = true
+}
+
+func releaseLock(db, key, owner) (ok) {
+  ok = false
+  rows := sqlite_query(db, "SELECT owner AS k, 0 AS n FROM locks WHERE key = ?", []string{key})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  if len(parsed) == 0 { return }
+  if parsed[0].k != owner { return }
+  sqlite_exec(db, "DELETE FROM locks WHERE key = ?", []string{key})
+  ok = true
+}
+
+func listLocks(db) (out) {
+  out = "[]"
+  rows := sqlite_query(db, "SELECT key AS k, expires_at AS n FROM locks ORDER BY key")
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, "{\"key\":" + jsonQuote(parsed[i].k) + ",\"expires_at\":" + jsonQuote(time_format_utc(parsed[i].n, "%Y-%m-%dT%H:%M:%SZ")) + "}")
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}
