@@ -99,3 +99,32 @@ error: type mismatch for 'rec' in "main": string vs bool — from "  FAIL " + la
 
 `rec` is an unrelated variable; the offending call was `expect(label, contains(...), true)`.
 The snippet in the message is the right clue, the name is not.
+
+## 8. Unreachable code is never typechecked
+
+```
+func dead() { println(chr(65)) }     // chr does not exist
+func main() { println("alive") }
+```
+```
+$ machin check spike.mfl   -> ok — no errors
+$ machin build spike.mfl   -> built
+```
+
+Call `dead()` from `main` and both correctly report `[undefined-name]`.
+
+So "check is clean" means "everything reachable from main is clean". A helper
+written but not yet wired up is entirely unverified, and every error in it
+arrives at once when you connect it. That is the worst moment for a batch of
+surprises.
+
+**Cost here:** `check` passed a file whose `urlDecode` called a nonexistent
+`chr`, because the test's `main` never reached it. The error only surfaced
+when the server's `main` did.
+
+## 9. No `chr` builtin
+
+`charat(string, int) -> string` exists; the reverse does not. Percent-decoding
+a URL has no direct route. machin-bkn uses a literal table of printable ASCII
+indexed by `code - 32`, which cannot reassemble UTF-8 above 126. SQLite's
+`char(X)` works if a handle is already open.

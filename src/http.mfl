@@ -1,0 +1,192 @@
+// http — the request surface. Paths carry their query string, so both are
+// parsed here rather than trusting a router.
+
+type Query struct { keys []string  vals []string }
+
+func pathOnly(p) (out) {
+  out = p
+  at := index(p, "?")
+  if at >= 0 { out = substr(p, 0, at) }
+}
+
+// MFL has charat (index -> character) but no chr (code -> character), so a
+// percent-escape is resolved through a literal table of printable ASCII
+// rather than constructed. Bytes outside 32..126 are left escaped: decoding
+// those means reassembling UTF-8 from raw bytes, which needs a chr.
+func asciiTable() (s) {
+  s = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+}
+
+func fromCode(n) (c) {
+  c = ""
+  if n < 32 { return }
+  if n > 126 { return }
+  c = substr(asciiTable(), n - 32, n - 31)
+}
+
+func urlDecode(s) (out) {
+  work := replace(s, "+", " ")
+  out = ""
+  i := 0
+  while i < len(work) {
+    c := substr(work, i, i+1)
+    if c == "%" {
+      if i + 3 <= len(work) {
+        ch := fromCode(hexVal(substr(work, i+1, i+3)))
+        if ch != "" {
+          out = out + ch
+          i = i + 3
+          continue
+        }
+      }
+    }
+    out = out + c
+    i = i + 1
+  }
+}
+
+func hexDigit(c) (v) {
+  v = 0
+  if c >= "0" { if c <= "9" { v = int(parse(c, 0)) } }
+  lc := to_lower(c)
+  if lc == "a" { v = 10 }
+  if lc == "b" { v = 11 }
+  if lc == "c" { v = 12 }
+  if lc == "d" { v = 13 }
+  if lc == "e" { v = 14 }
+  if lc == "f" { v = 15 }
+}
+
+func hexVal(h) (v) { v = hexDigit(substr(h, 0, 1)) * 16 + hexDigit(substr(h, 1, 2)) }
+
+func parseQuery(p) (q) {
+  q = Query{keys: []string{}, vals: []string{}}
+  at := index(p, "?")
+  if at < 0 { return }
+  raw := substr(p, at+1, len(p))
+  pairs := split(raw, "&")
+  i := 0
+  while i < len(pairs) {
+    pair := pairs[i]
+    if pair != "" {
+      eq := index(pair, "=")
+      if eq < 0 {
+        q.keys = append(q.keys, urlDecode(pair))
+        q.vals = append(q.vals, "")
+      } else {
+        q.keys = append(q.keys, urlDecode(substr(pair, 0, eq)))
+        q.vals = append(q.vals, urlDecode(substr(pair, eq+1, len(pair))))
+      }
+    }
+    i = i + 1
+  }
+}
+
+func qGet(q, name) (v) {
+  v = ""
+  i := 0
+  while i < len(q.keys) {
+    if q.keys[i] == name { v = q.vals[i]  return }
+    i = i + 1
+  }
+}
+
+func qInt(q, name, fallback) (n) {
+  n = fallback
+  v := qGet(q, name)
+  if v == "" { return }
+  if looksNumeric(v) { n = int(parse(v, 0)) }
+}
+
+func segments(p) (out) {
+  out = []string{}
+  parts := split(pathOnly(p), "/")
+  i := 0
+  while i < len(parts) {
+    if parts[i] != "" { out = append(out, parts[i]) }
+    i = i + 1
+  }
+}
+
+// A query parameter may carry an operator: ?price=gt:20, ?status=in:a,b
+func filtersFrom(q) (out) {
+  out = []Filter{}
+  i := 0
+  while i < len(q.keys) {
+    k := q.keys[i]
+    reserved := false
+    if k == "limit" { reserved = true }
+    if k == "offset" { reserved = true }
+    if k == "order_by" { reserved = true }
+    if k == "order" { reserved = true }
+    if k == "id_only" { reserved = true }
+    if !reserved {
+      raw := q.vals[i]
+      op := "eq"
+      value := raw
+      colon := index(raw, ":")
+      if colon > 0 {
+        candidate := substr(raw, 0, colon)
+        if isOperator(candidate) {
+          op = candidate
+          value = substr(raw, colon+1, len(raw))
+        }
+      }
+      out = append(out, Filter{field: k, op: op, value: value})
+    }
+    i = i + 1
+  }
+}
+
+func isOperator(s) (ok) {
+  ok = false
+  if s == "eq" { ok = true }
+  if s == "ne" { ok = true }
+  if s == "gt" { ok = true }
+  if s == "gte" { ok = true }
+  if s == "lt" { ok = true }
+  if s == "lte" { ok = true }
+  if s == "in" { ok = true }
+}
+
+// --- responses ------------------------------------------------------------
+
+func jsonRes(status, body) (r) { r = response(status, "application/json; charset=utf-8", body) }
+
+func errRes(status, kind, message) (r) {
+  r = jsonRes(status, "{\"ok\":false,\"error\":{\"message\":" + jsonQuote(message) + ",\"type\":" + jsonQuote(kind) + "}}")
+}
+
+func jsonQuote(s) (out) {
+  out = "\"" + replace(replace(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+}
+
+// --- auth -----------------------------------------------------------------
+
+func bearer(req) (tok) {
+  tok = ""
+  h := header(req, "authorization")
+  if len(h) > 7 {
+    if substr(h, 0, 7) == "Bearer " { tok = substr(h, 7, len(h)) }
+  }
+}
+
+// A request that arrived through a reverse proxy is not a local one, so it
+// never inherits the trust a direct loopback caller would get.
+func proxied(req) (yes) {
+  yes = false
+  if header(req, "x-forwarded-for") != "" { yes = true }
+  if header(req, "x-forwarded-host") != "" { yes = true }
+  if header(req, "x-real-ip") != "" { yes = true }
+  if header(req, "forwarded") != "" { yes = true }
+  if header(req, "x-forwarded-proto") != "" { yes = true }
+}
+
+func authed(req, adminToken, host) (ok) {
+  ok = false
+  if adminToken == "" {
+    if host == "127.0.0.1" { if !proxied(req) { ok = true } }
+    return
+  }
+  if bearer(req) == adminToken { ok = true }
+}

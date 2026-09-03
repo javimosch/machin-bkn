@@ -36,6 +36,18 @@ done
 
 113 assertions. `BKN_TEST_URL` moves the address only; no assertion changes.
 
+`SP` must point at `~/ai/bkn/test` — the committed harness. Pointing it at a
+copy elsewhere silently runs an older `dog.sh`, which still targets the live
+Go deployment: the suite then reports failures that belong to a different
+server. That wasted a debugging cycle here.
+
+### Score
+
+| Suite | machin build |
+|---|---|
+| `t-store.sh` | **16 / 16** |
+| everything else | not yet implemented |
+
 ## What machin gives us, verified not assumed
 
 `machin guide` (v0.137.0) — 181 builtins. Checked against what the contract needs:

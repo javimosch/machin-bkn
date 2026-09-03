@@ -1,0 +1,119 @@
+
+var gDB = 0
+var gAdmin = ""
+var gHost = "127.0.0.1"
+
+func storeRoutes(req, q, segs) (res, handled) {
+  handled = true
+  ns := segs[2]
+  coll := segs[3]
+  ref := ns + "/" + coll
+  _, _, refErr := splitRef(ref)
+  if refErr != "" { res = errRes("400 Bad Request", "invalid_arguments", refErr)  return }
+
+  if len(segs) == 4 {
+    if req.method == "GET" {
+      filters := filtersFrom(q)
+      limit := qInt(q, "limit", 50)
+      offset := qInt(q, "offset", 0)
+      orderBy := qGet(q, "order_by")
+      // Over HTTP the direction defaults to descending; only an explicit
+      // order=asc reverses it. (The CLI spells this the other way round:
+      // --order-by <field> is ascending and <field>:desc is not.)
+      desc := true
+      if qGet(q, "order") == "asc" { desc = false }
+
+      records := listJSON(gDB, ns, coll, filters, orderBy, desc, limit, offset)
+      total := countDocs(gDB, ns, coll, filters)
+      count := countArray(records)
+      res = jsonRes("200 OK", "{\"ok\":true,\"collection\":" + jsonQuote(ref) + ",\"count\":" + str(count) + ",\"total\":" + str(total) + ",\"records\":" + records + "}")
+      return
+    }
+    if req.method == "POST" {
+      record, err := putDoc(gDB, ns, coll, qGet(q, "id"), req.body)
+      if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
+      res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")
+      return
+    }
+    res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
+    return
+  }
+
+  id := segs[4]
+  if req.method == "GET" {
+    record, found := getDoc(gDB, ns, coll, id)
+    if !found { res = errRes("404 Not Found", "not_found", "record not found")  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")
+    return
+  }
+  if req.method == "PATCH" {
+    record, found, err := patchDoc(gDB, ns, coll, id, req.body)
+    if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
+    if !found { res = errRes("404 Not Found", "not_found", "record not found")  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")
+    return
+  }
+  if req.method == "DELETE" {
+    if !deleteDoc(gDB, ns, coll, id) { res = errRes("404 Not Found", "not_found", "record not found")  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"deleted\":" + jsonQuote(id) + ",\"collection\":" + jsonQuote(ref) + "}")
+    return
+  }
+  res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
+}
+
+func countArray(arr) (n) {
+  n = 0
+  rows := sqlite_query(gDB, "SELECT COUNT(*) AS c FROM json_each(?)", []string{arr})
+  if rows == "[]" { return }
+  v, e := json_get(rows, "[0].c")
+  if e == "" { n = int(parse(v, 0)) }
+}
+
+func handle(req) (res) {
+  q := parseQuery(req.path)
+  segs := segments(req.path)
+
+  // Open by design: a liveness probe that needs a credential cannot tell you
+  // that credentials are what is broken.
+  if len(segs) == 1 {
+    if segs[0] == "_health" {
+      if sqlite_query(gDB, "SELECT 1 AS ok") == "[]" {
+        res = jsonRes("503 Service Unavailable", "{\"ok\":false,\"service\":\"bkn\",\"reason\":\"datastore unreachable\"}")
+        return
+      }
+      res = jsonRes("200 OK", "{\"ok\":true,\"service\":\"bkn\",\"pid\":0}")
+      return
+    }
+  }
+
+  if len(segs) >= 3 {
+    if segs[0] == "v1" {
+      if segs[1] == "store" {
+        if !authed(req, gAdmin, gHost) {
+          res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
+          return
+        }
+        r, handled := storeRoutes(req, q, segs)
+        if handled { res = r  return }
+      }
+    }
+  }
+
+  res = errRes("404 Not Found", "not_found", "no such route")
+}
+
+func main() {
+  path := env("BKN_DATA")
+  if path == "" { path = "bkn.db" }
+  gAdmin = env("BKN_ADMIN_TOKEN")
+  gHost = env("BKN_HOST")
+  if gHost == "" { gHost = "127.0.0.1" }
+  port := 7799
+  p := env("BKN_PORT")
+  if p != "" { if looksNumeric(p) { port = int(parse(p, 0)) } }
+
+  gDB = storeOpen(path)
+  if gDB == 0 { println("cannot open " + path)  return }
+  println("[serve] listening on http://" + gHost + ":" + str(port))
+  serve(port, func(req) { return handle(req) })
+}

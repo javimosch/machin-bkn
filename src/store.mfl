@@ -435,3 +435,28 @@ func findDoc(db, ns, coll, filters) (record, found) {
   record = jsonString(rows, "[0].d", "")
   if record != "" { found = true }
 }
+
+// listJSON returns the page already assembled as a JSON array of documents.
+// Building it with json_group_array inside SQL avoids unescaping every row
+// individually on the way out — the rows wrapper would otherwise nest one
+// escaped JSON string per record.
+func listJSON(db, ns, coll, filters, orderBy, desc, limit, offset) (out) {
+  out = "[]"
+  rules := normalizersOf(db, ns, coll)
+  where, whereBinds := whereClause(filters, rules)
+  order, orderBinds := orderClause(orderBy, desc)
+  if limit <= 0 { limit = 50 }
+
+  binds := []string{ns, coll}
+  i := 0
+  while i < len(whereBinds) { binds = append(binds, whereBinds[i])  i = i + 1 }
+  i = 0
+  while i < len(orderBinds) { binds = append(binds, orderBinds[i])  i = i + 1 }
+  binds = append(binds, str(limit))
+  binds = append(binds, str(offset))
+
+  sql := "SELECT json_group_array(json(d)) AS a FROM (SELECT json_set(doc, '$.id', id) AS d FROM records WHERE ns=? AND coll=?" + where + order + " LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER))"
+  rows := sqlite_query(db, sql, binds)
+  if rows == "[]" { return }
+  out = jsonString(rows, "[0].a", "[]")
+}
