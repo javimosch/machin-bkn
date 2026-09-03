@@ -14,6 +14,7 @@ func storeOpen(path) (db) {
   db = sqlite_open(path)
   if db == 0 { return }
   sqlite_exec(db, storeSchema())
+  sqlite_exec(db, kvSchema())
 }
 
 func nowStamp() (s) { s = time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ") }

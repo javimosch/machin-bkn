@@ -1,0 +1,222 @@
+// kv — typed settings, optionally sealed.
+//
+// The encrypted payload is a wire format the contract pins exactly:
+//   {"alg":"aes-256-gcm","keyId":"v1","iv":b64,"tag":b64,"ciphertext":b64}
+// so it is written field by field rather than through a serializer.
+
+func kvSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', public INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);"
+}
+
+func kvTypes() (s) { s = "string, json, encrypted" }
+
+func validKvType(t) (ok) {
+  ok = false
+  if t == "string" { ok = true }
+  if t == "json" { ok = true }
+  if t == "encrypted" { ok = true }
+}
+
+// --- keyring --------------------------------------------------------------
+
+// The contract accepts three encodings for the same 32 bytes, in this order:
+// hex-64, base64-32, or 32 literal characters.
+func parseKeyMaterial(raw) (key, ok) {
+  key = bytes("")
+  ok = false
+  if raw == "" { return }
+  if len(raw) == 64 {
+    if isHex(raw) {
+      key = from_hex(raw)
+      ok = true
+      return
+    }
+  }
+  decoded := base64_decode_bytes(raw)
+  if len(decoded) == 32 {
+    key = decoded
+    ok = true
+    return
+  }
+  if len(raw) == 32 {
+    key = bytes(raw)
+    ok = true
+  }
+}
+
+func isHex(s) (ok) {
+  ok = true
+  i := 0
+  while i < len(s) {
+    c := to_lower(substr(s, i, i+1))
+    good := false
+    if c >= "0" { if c <= "9" { good = true } }
+    if c >= "a" { if c <= "f" { good = true } }
+    if !good { ok = false  return }
+    i = i + 1
+  }
+}
+
+// BKN_ENCRYPTION_KEY wins, then the names the deployments being migrated
+// already set.
+func encryptionKey() (key, ok) {
+  key = bytes("")
+  ok = false
+  names := []string{"BKN_ENCRYPTION_KEY", "SUPERBACKEND_ENCRYPTION_KEY", "SAASBACKEND_ENCRYPTION_KEY"}
+  i := 0
+  while i < len(names) {
+    raw := env(names[i])
+    if raw != "" {
+      k, good := parseKeyMaterial(raw)
+      if good { key = k  ok = true  return }
+    }
+    i = i + 1
+  }
+}
+
+// --- sealing --------------------------------------------------------------
+
+func kvSeal(plain) (payload, err) {
+  payload = ""
+  err = ""
+  key, ok := encryptionKey()
+  if !ok { err = "no encryption key configured"  return }
+
+  iv := rand_bytes(12)
+  sealed := aes_gcm_encrypt(key, iv, bytes(plain), bytes(""))
+  cut := len(sealed) - 16
+  if cut < 0 { err = "encryption failed"  return }
+
+  // The builtin returns ciphertext||tag; the wire format keeps them apart.
+  ct := bytes_sub(sealed, 0, cut)
+  tag := bytes_sub(sealed, cut, len(sealed))
+  payload = "{\"alg\":\"aes-256-gcm\",\"keyId\":\"v1\",\"iv\":" + jsonQuote(base64_encode_bytes(iv)) + ",\"tag\":" + jsonQuote(base64_encode_bytes(tag)) + ",\"ciphertext\":" + jsonQuote(base64_encode_bytes(ct)) + "}"
+}
+
+func kvOpen(payload) (plain, err) {
+  plain = ""
+  err = ""
+  key, ok := encryptionKey()
+  if !ok { err = "no encryption key configured"  return }
+
+  alg := jsonField(payload, ".alg")
+  if alg != "aes-256-gcm" { err = "unsupported encryption algorithm"  return }
+  iv := base64_decode_bytes(jsonField(payload, ".iv"))
+  tag := base64_decode_bytes(jsonField(payload, ".tag"))
+  ct := base64_decode_bytes(jsonField(payload, ".ciphertext"))
+
+  opened := aes_gcm_decrypt(key, iv, bytes_concat(ct, tag), bytes(""))
+  if len(opened) == 0 {
+    if len(ct) > 0 { err = "decrypt failed (wrong key or tampered value)"  return }
+  }
+  plain = bytes_str(opened)
+}
+
+func jsonField(doc, path) (out) {
+  out = ""
+  v, e := json_get(doc, path)
+  if e == "" { out = unquote(v) }
+}
+
+// --- entries --------------------------------------------------------------
+
+// `type` is an MFL keyword, so the column is aliased to `kind` in every
+// SELECT that decodes into this struct.
+type KvEntry struct { key string  value string  kind string  description string  public int  updated_at string }
+
+func kvSet(db, key, value, kind, description, public) (entry, err) {
+  entry = ""
+  err = ""
+  if kind == "" { kind = "string" }
+  if !validKvType(kind) { err = "type must be one of: " + kvTypes()  return }
+
+  stored := value
+  if kind == "json" {
+    if sqlite_query(db, "SELECT json_valid(?) AS v", []string{value}) == "[]" { err = "value is not valid JSON"  return }
+    if jsonField(sqlite_query(db, "SELECT json_valid(?) AS v", []string{value}), "[0].v") != "1" { err = "value is not valid JSON"  return }
+  }
+  if kind == "encrypted" {
+    // A sealed value served to unauthenticated readers is a contradiction,
+    // not a configuration.
+    if public { err = "an encrypted entry cannot be public"  return }
+    sealed, sealErr := kvSeal(value)
+    if sealErr != "" { err = sealErr  return }
+    stored = sealed
+  }
+
+  pub := 0
+  if public { pub = 1 }
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO kv (key, value, type, description, public, updated_at) VALUES (?,?,?,?,CAST(? AS INTEGER),?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, type=excluded.type, description=excluded.description, public=excluded.public, updated_at=excluded.updated_at", []string{key, stored, kind, description, str(pub), stamp})
+  entry = kvJSON(key, value, kind, description, pub, stamp)
+}
+
+func kvJSON(key, value, kind, description, public, stamp) (out) {
+  pub := "false"
+  if public == 1 { pub = "true" }
+  out = "{\"key\":" + jsonQuote(key) + ",\"value\":" + jsonQuote(value) + ",\"type\":" + jsonQuote(kind) + ",\"description\":" + jsonQuote(description) + ",\"public\":" + pub + ",\"updated_at\":" + jsonQuote(stamp) + "}"
+}
+
+// kvMeta reads an entry WITHOUT decrypting it. Access is decided on metadata
+// alone: attempting the decrypt first lets a decrypt error reveal that a
+// private key exists.
+func kvMeta(db, key) (row, found) {
+  row = KvEntry{key: "", value: "", kind: "", description: "", public: 0, updated_at: ""}
+  found = false
+  rows := sqlite_query(db, "SELECT key, value, type AS kind, description, public, updated_at FROM kv WHERE key = ?", []string{key})
+  if rows == "[]" { return }
+  parsed := parse(rows, []KvEntry{})
+  if len(parsed) == 0 { return }
+  row = parsed[0]
+  found = true
+}
+
+func kvGet(db, key) (entry, found, err) {
+  entry = ""
+  found = false
+  err = ""
+  row, ok := kvMeta(db, key)
+  if !ok { return }
+  found = true
+  value := row.value
+  if row.kind == "encrypted" {
+    opened, openErr := kvOpen(row.value)
+    if openErr != "" { err = "cannot read " + key + ": " + openErr  return }
+    value = opened
+  }
+  entry = kvJSON(row.key, value, row.kind, row.description, row.public, row.updated_at)
+}
+
+// kvList never returns an encrypted value: those come back empty and must be
+// fetched one at a time.
+func kvList(db, prefix, publicOnly) (out) {
+  out = "[]"
+  sql := "SELECT key, CASE WHEN type = 'encrypted' THEN '' ELSE value END AS value, type AS kind, description, public, updated_at FROM kv WHERE 1=1"
+  binds := []string{}
+  if prefix != "" {
+    sql = sql + " AND key LIKE ?"
+    binds = append(binds, prefix + "%")
+  }
+  if publicOnly { sql = sql + " AND public = 1" }
+  sql = sql + " ORDER BY key"
+
+  rows := sqlite_query(db, sql, binds)
+  if rows == "[]" { return }
+  parsed := parse(rows, []KvEntry{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    e := parsed[i]
+    parts = append(parts, kvJSON(e.key, e.value, e.kind, e.description, e.public, e.updated_at))
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}
+
+func kvDelete(db, key) (found) {
+  found = false
+  _, ok := kvMeta(db, key)
+  if !ok { return }
+  sqlite_exec(db, "DELETE FROM kv WHERE key = ?", []string{key})
+  found = true
+}

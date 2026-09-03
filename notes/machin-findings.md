@@ -128,3 +128,16 @@ when the server's `main` did.
 a URL has no direct route. machin-bkn uses a literal table of printable ASCII
 indexed by `code - 32`, which cannot reassemble UTF-8 above 126. SQLite's
 `char(X)` works if a handle is already open.
+
+## 10. `type` is a keyword and cannot name a struct field
+
+```
+type KvEntry struct { key string  value string  type string }
+  -> [parse-expected] expected "", got "type"
+```
+
+Unavoidable for any table or document with a `type` column, which is common.
+Workaround: alias in SQL (`SELECT type AS kind`) and name the field `kind`,
+since `parse()` matches struct fields to column names. Worth a mention in the
+guide's gotchas next to the existing `lambda-and-builtin-names` entry, which
+covers the adjacent case (a function may not be named like a builtin).

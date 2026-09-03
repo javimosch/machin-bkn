@@ -46,7 +46,13 @@ server. That wasted a debugging cycle here.
 | Suite | machin build |
 |---|---|
 | `t-store.sh` | **16 / 16** |
+| `t-kv.sh` | **7 / 7** |
 | everything else | not yet implemented |
+
+The kv wire format is verified **interoperable with Node's crypto in both
+directions**, not merely self-consistent — a clean-room implementation that
+only round-trips through itself would pass the suite while being unable to
+read the reference implementation's data.
 
 ## What machin gives us, verified not assumed
 

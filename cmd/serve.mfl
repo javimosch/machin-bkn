@@ -61,6 +61,63 @@ func storeRoutes(req, q, segs) (res, handled) {
   res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
 }
 
+func kvRoutes(req, q, segs) (res) {
+  if len(segs) == 2 {
+    // ?public=1 is the one unauthenticated listing; anything broader needs
+    // the token.
+    publicOnly := qGet(q, "public") == "1"
+    if !publicOnly {
+      if !authed(req, gAdmin, gHost) {
+        res = errRes("403 Forbidden", "not_authenticated", "listing non-public entries requires a bearer token")
+        return
+      }
+    }
+    entries := kvList(gDB, qGet(q, "prefix"), publicOnly)
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(entries)) + ",\"entries\":" + entries + "}")
+    return
+  }
+
+  key := segs[2]
+  if req.method == "GET" {
+    // Decided on metadata alone. Decrypting first would let a decrypt error
+    // reveal that a private key exists.
+    meta, found := kvMeta(gDB, key)
+    if !found { res = errRes("404 Not Found", "not_found", "key not found")  return }
+    if meta.public != 1 {
+      if !authed(req, gAdmin, gHost) {
+        // The same answer as a missing key: whether a private setting exists
+        // is itself information.
+        res = errRes("404 Not Found", "not_found", "key not found")
+        return
+      }
+    }
+    entry, _, err := kvGet(gDB, key)
+    if err != "" { res = errRes("500 Internal Server Error", "internal_error", err)  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"entry\":" + entry + "}")
+    return
+  }
+
+  if !authed(req, gAdmin, gHost) {
+    res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
+    return
+  }
+  if req.method == "POST" {
+    kind := jsonField(req.body, ".type")
+    if kind == "" { kind = "string" }
+    public := jsonField(req.body, ".public") == "true"
+    entry, err := kvSet(gDB, key, jsonField(req.body, ".value"), kind, jsonField(req.body, ".description"), public)
+    if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"entry\":" + entry + "}")
+    return
+  }
+  if req.method == "DELETE" {
+    if !kvDelete(gDB, key) { res = errRes("404 Not Found", "not_found", "key not found")  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"deleted\":" + jsonQuote(key) + "}")
+    return
+  }
+  res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
+}
+
 func countArray(arr) (n) {
   n = 0
   rows := sqlite_query(gDB, "SELECT COUNT(*) AS c FROM json_each(?)", []string{arr})
@@ -83,6 +140,15 @@ func handle(req) (res) {
       }
       res = jsonRes("200 OK", "{\"ok\":true,\"service\":\"bkn\",\"pid\":0}")
       return
+    }
+  }
+
+  if len(segs) >= 2 {
+    if segs[0] == "v1" {
+      if segs[1] == "kv" {
+        res = kvRoutes(req, q, segs)
+        return
+      }
     }
   }
 
