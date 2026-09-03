@@ -618,6 +618,14 @@ func main() {
   gScheduler = 1
   go schedulerLoop(gDB)
 
-  println("[serve] listening on http://" + gHost + ":" + str(port))
+  // Announce the intent, not the outcome: this used to claim "listening" before
+  // the bind was attempted, so a port already in use printed a success line and
+  // exited 0. A stale server then kept serving an old database while a test run
+  // believed it was talking to the new one -- which is exactly how a green
+  // suite turned into 13 mysterious failures.
+  println("[serve] starting on http://" + gHost + ":" + str(port))
   serve(port, func(req) { return handle(req) })
+  // serve() only returns when it could not bind; a bound server loops forever.
+  println("[serve] could not bind " + gHost + ":" + str(port) + " — is another instance already running?")
+  exit(75)
 }

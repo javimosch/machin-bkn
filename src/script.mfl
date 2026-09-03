@@ -141,7 +141,12 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
   if db == 0 { out = hostErr("no datastore bound to this run")  return }
 
   if op == "crypto.hmac" { out = hostOK(jsonQuote(hmac_sha256(argAt(argsJSON, 0), argAt(argsJSON, 1))))  return }
+  // `hash` is the name the published surface uses; `sha256` is kept because
+  // scripts here were written against it before that was noticed.
+  if op == "crypto.hash" { out = hostOK(jsonQuote(sha256(argAt(argsJSON, 0))))  return }
   if op == "crypto.sha256" { out = hostOK(jsonQuote(sha256(argAt(argsJSON, 0))))  return }
+  if op == "crypto.base64Encode" { out = hostOK(jsonQuote(base64_encode(argAt(argsJSON, 0))))  return }
+  if op == "crypto.base64Decode" { out = hostOK(jsonQuote(base64_decode(argAt(argsJSON, 0))))  return }
   if op == "crypto.randomHex" {
     n := 16
     if looksNumeric(argRaw(argsJSON, 0)) { n = int(parse(argRaw(argsJSON, 0), 0)) }
@@ -296,6 +301,218 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
     return
   }
 
+  // --- identity -----------------------------------------------------------
+  // Every one of these was named in the prelude and implemented nowhere, so
+  // bkn.auth.can threw "unknown host capability". Shapes and argument order
+  // were read off the Go build: createUser takes an options map third,
+  // createOrg takes a slug and a name, and verify takes an access token (not
+  // an email and password) and answers the claims.
+
+  if op == "auth.createUser" {
+    aName := ""
+    aRole := "user"
+    n1, n1e := json_get(argRaw(argsJSON, 2), ".name")
+    if n1e == "" { aName = unescape(unquote(n1)) }
+    r1, r1e := json_get(argRaw(argsJSON, 2), ".role")
+    if r1e == "" { aRole = unescape(unquote(r1)) }
+    u1, u1err := createUser(db, argAt(argsJSON, 0), argAt(argsJSON, 1), aName, aRole)
+    if u1err != "" { out = hostErr(u1err)  return }
+    out = hostOK(u1)
+    return
+  }
+
+  if op == "auth.findUser" {
+    fu, fuFound := findUser(db, argAt(argsJSON, 0))
+    if !fuFound { out = hostOK("null")  return }
+    out = hostOK(userJSON(fu))
+    return
+  }
+
+  if op == "auth.updateUser" {
+    uName := ""
+    uRole := ""
+    uPass := ""
+    uDis := false
+    uSetDis := false
+    v1, v1e := json_get(argRaw(argsJSON, 1), ".name")
+    if v1e == "" { uName = unescape(unquote(v1)) }
+    v2, v2e := json_get(argRaw(argsJSON, 1), ".role")
+    if v2e == "" { uRole = unescape(unquote(v2)) }
+    v3, v3e := json_get(argRaw(argsJSON, 1), ".password")
+    if v3e == "" { uPass = unescape(unquote(v3)) }
+    v4, v4e := json_get(argRaw(argsJSON, 1), ".disabled")
+    if v4e == "" { uSetDis = true  uDis = v4 == "true" }
+    uu, uuErr := updateUser(db, argAt(argsJSON, 0), uName, uRole, uPass, uDis, uSetDis)
+    if uuErr != "" { out = hostErr(uuErr)  return }
+    out = hostOK(userJSON(uu))
+    return
+  }
+
+  if op == "auth.deleteUser" {
+    if deleteUser(db, argAt(argsJSON, 0)) { out = hostOK("true")  return }
+    out = hostOK("false")
+    return
+  }
+
+  if op == "auth.createOrg" {
+    o1, o1err := createOrg(db, argAt(argsJSON, 0), argAt(argsJSON, 1))
+    if o1err != "" { out = hostErr(o1err)  return }
+    out = hostOK(o1)
+    return
+  }
+
+  if op == "auth.orgs" { out = hostOK(listOrgs(db))  return }
+
+  if op == "auth.addMember" {
+    amRole := argAt(argsJSON, 2)
+    if amRole == "" { amRole = "member" }
+    amErr := addMember(db, argAt(argsJSON, 0), argAt(argsJSON, 1), amRole)
+    if amErr != "" { out = hostErr(amErr)  return }
+    amOrg, _ := findOrg(db, argAt(argsJSON, 0))
+    amUser, _ := findUser(db, argAt(argsJSON, 1))
+    out = hostOK("{\"org_id\":" + jsonQuote(amOrg.id) + ",\"org_slug\":" + jsonQuote(amOrg.slug) +
+      ",\"user_id\":" + jsonQuote(amUser.id) + ",\"user_email\":" + jsonQuote(amUser.email) +
+      ",\"role\":" + jsonQuote(amRole) + ",\"created_at\":" + jsonQuote(nowStamp()) + "}")
+    return
+  }
+
+  if op == "auth.removeMember" {
+    rmOK, rmErr := removeMember(db, argAt(argsJSON, 0), argAt(argsJSON, 1))
+    if rmErr != "" { out = hostErr(rmErr)  return }
+    if rmOK { out = hostOK("true")  return }
+    out = hostOK("false")
+    return
+  }
+
+  if op == "auth.members" {
+    ms, msErr := listMembers(db, argAt(argsJSON, 0))
+    if msErr != "" { out = hostErr(msErr)  return }
+    out = hostOK(ms)
+    return
+  }
+
+  if op == "auth.memberships" {
+    mu, muFound := findUser(db, argAt(argsJSON, 0))
+    if !muFound { out = hostErr("user not found")  return }
+    mo, _ := membershipsOf(db, mu.id)
+    out = hostOK(mo)
+    return
+  }
+
+  if op == "auth.can" {
+    cu, cuFound := findUser(db, argAt(argsJSON, 0))
+    if !cuFound { out = hostErr("user not found")  return }
+    co, coFound := findOrg(db, argAt(argsJSON, 1))
+    if !coFound { out = hostErr("organization not found")  return }
+    have, haveFound := membershipRole(db, co.id, cu.id)
+    if !haveFound { out = hostOK("false")  return }
+    if roleAtLeast(have, argAt(argsJSON, 2)) { out = hostOK("true")  return }
+    out = hostOK("false")
+    return
+  }
+
+  if op == "auth.issue" {
+    iu, iuFound := findUser(db, argAt(argsJSON, 0))
+    if !iuFound { out = hostErr("user not found")  return }
+    tk, tkErr := issueTokens(db, iu, argAt(argsJSON, 1))
+    if tkErr != "" { out = hostErr(tkErr)  return }
+    out = hostOK(tk)
+    return
+  }
+
+  if op == "auth.verify" {
+    claims, cErr := parseJWT(signingSecret(db), argAt(argsJSON, 0))
+    if cErr != "" { out = hostOK("null")  return }
+    out = hostOK(claims)
+    return
+  }
+
+  if op == "auth.me" {
+    mu2, _, mErr := meFromToken(db, argAt(argsJSON, 0))
+    if mErr != "" { out = hostOK("null")  return }
+    out = hostOK(mu2)
+    return
+  }
+
+  if op == "events.stats" {
+    // `by` is a bare string here, not an options object -- read off the Go
+    // build, which answers "group must be one of: ..." when handed an object.
+    stats, _, serr := eventStats(db, argAt(argsJSON, 0), argAt(argsJSON, 1), "")
+    if serr != "" { out = hostErr(serr)  return }
+    out = hostOK(stats)
+    return
+  }
+
+  if op == "store.collections" {
+    out = hostOK(listCollections(db, argAt(argsJSON, 0)))
+    return
+  }
+
+  if op == "files.namespaces" { out = hostOK(listNs(db))  return }
+
+  if op == "files.list" {
+    out = hostOK(listFilesSandbox(db, argAt(argsJSON, 0), 100, 0))
+    return
+  }
+
+  if op == "files.show" {
+    // Distinct names on purpose: `:=` is function-scoped in MFL, so a short
+    // name here collides with one already used elsewhere in hostCall.
+    fRow, fFound := findFile(db, argAt(argsJSON, 0), argAt(argsJSON, 1))
+    // A missing file is null, not an error: the Go build answers null, and a
+    // script asking "is this here" should not have to wrap it in try/catch.
+    if !fFound { out = hostOK("null")  return }
+    out = hostOK(fileSandboxJSON(fRow))
+    return
+  }
+
+  if op == "files.put" {
+    putCtype := ""
+    ct, ctErr := json_get(argRaw(argsJSON, 3), ".content_type")
+    if ctErr == "" { putCtype = unescape(unquote(ct)) }
+    _, putErr, _ := putFile(db, argAt(argsJSON, 0), argAt(argsJSON, 1), bytes(argAt(argsJSON, 2)), putCtype, "{}")
+    if putErr != "" { out = hostErr(putErr)  return }
+    // Re-read so the answer is the sandbox shape. putFile returns the HTTP
+    // shape (`ns`, `ctype`), which is pinned by the acceptance suite and is
+    // not what a script sees.
+    pRow, pFound := findFile(db, argAt(argsJSON, 0), argAt(argsJSON, 1))
+    if !pFound { out = hostErr("the file was written but could not be read back")  return }
+    out = hostOK(fileSandboxJSON(pRow))
+    return
+  }
+
+  if op == "files.get" {
+    gRow, gFound := findFile(db, argAt(argsJSON, 0), argAt(argsJSON, 1))
+    if !gFound { out = hostOK("null")  return }
+    // The contract caps one read at 8 MB: a blob store holds things a
+    // JavaScript string should not.
+    if gRow.size > 8388608 { out = hostErr("file is larger than the 8 MB a script may read in one call")  return }
+    blobBytes := readBlob(gRow.sha256)
+    blobText := bytes_str(blobBytes)
+    blobEnc := "utf8"
+    blobBody := ""
+    // bytes_str stops at the first zero byte, so a short read means the blob
+    // is not text. Base64 rather than a silently truncated string.
+    if len(blobText) != len(blobBytes) {
+      blobEnc = "base64"
+      blobBody = base64_encode_bytes(blobBytes)
+    } else {
+      blobBody = blobText
+    }
+    out = hostOK("{\"namespace\":" + jsonQuote(gRow.ns) + ",\"name\":" + jsonQuote(gRow.name) +
+      ",\"sha256\":" + jsonQuote(gRow.sha256) + ",\"size\":" + str(gRow.size) +
+      ",\"content_type\":" + jsonQuote(gRow.ctype) + ",\"metadata\":" + gRow.meta +
+      ",\"encoding\":" + jsonQuote(blobEnc) + ",\"content\":" + jsonQuote(blobBody) + "}")
+    return
+  }
+
+  if op == "files.delete" {
+    derr := deleteFile(db, argAt(argsJSON, 0), argAt(argsJSON, 1))
+    if derr != "" { out = hostErr(derr)  return }
+    out = hostOK("true")
+    return
+  }
+
   if op == "events.prune" {
     removed, err := pruneEvents(db, argAt(argsJSON, 1), argAt(argsJSON, 0))
     if err != "" { out = hostErr(err)  return }
@@ -315,11 +532,25 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
     if looksNumeric(argRaw(argsJSON, 1)) { ttl = int(parse(argRaw(argsJSON, 1), 0)) }
     owner, ok := acquireLock(db, argAt(argsJSON, 0), ttl)
     if !ok { out = hostOK("null")  return }
-    out = hostOK("{\"key\":" + jsonQuote(argAt(argsJSON, 0)) + ",\"owner\":" + jsonQuote(owner) + "}")
+    // acquired_at/expires_at come from the Go build's shape: a lease is only
+    // useful if the holder can see when it runs out.
+    out = hostOK("{\"key\":" + jsonQuote(argAt(argsJSON, 0)) + ",\"owner\":" + jsonQuote(owner) +
+      ",\"acquired_at\":" + jsonQuote(time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ")) +
+      ",\"expires_at\":" + jsonQuote(time_format_utc(now() + ttl, "%Y-%m-%dT%H:%M:%SZ")) + "}")
     return
   }
   if op == "lock.release" {
     if releaseLock(db, argAt(argsJSON, 0), argAt(argsJSON, 1)) { out = hostOK("true") } else { out = hostOK("false") }
+    return
+  }
+  if op == "lock.renew" {
+    ttl := 300
+    if looksNumeric(argRaw(argsJSON, 2)) { ttl = int(parse(argRaw(argsJSON, 2), 0)) }
+    ok := renewLock(db, argAt(argsJSON, 0), argAt(argsJSON, 1), ttl)
+    // A boolean, matching the Go build: renew answers whether you still hold
+    // it, and the caller already has the key and owner.
+    if !ok { out = hostOK("false")  return }
+    out = hostOK("true")
     return
   }
 

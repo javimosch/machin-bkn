@@ -115,7 +115,23 @@ func typeAllowed(csv, ctype) (ok) {
   if semi > 0 { base = substr(base, 0, semi) }
   base = to_lower(trim(base))
   for _, t := range split(csv, ",") {
-    if to_lower(trim(t)) == base { return }
+    rule := to_lower(trim(t))
+    if rule == base { return }
+    // `image/*` is the form the published guide uses, and it was not honoured
+    // here: an allow-list that silently refuses everything is as wrong as one
+    // that silently permits everything, and this one refused. `*` alone means
+    // any type, which is the same as an empty list but says so explicitly.
+    if rule == "*" { return }
+    if rule == "*/*" { return }
+    star := index(rule, "/*")
+    if star > 0 {
+      if star + 2 == len(rule) {
+        prefix := substr(rule, 0, star + 1)
+        if len(base) > len(prefix) {
+          if substr(base, 0, len(prefix)) == prefix { return }
+        }
+      }
+    }
   }
   ok = false
 }
@@ -247,4 +263,31 @@ func fileHeaders(res, f) (out) {
   out = with_header(out, "Content-Security-Policy", "default-src 'none'; sandbox")
   out = with_header(out, "ETag", "\"" + f.sha256 + "\"")
   out = with_header(out, "Cache-Control", "public, max-age=31536000, immutable")
+}
+
+// fileSandboxJSON is the shape a script sees, which is not the shape the HTTP
+// route emits: the sandbox uses `namespace` and `content_type` where the HTTP
+// surface uses `ns` and `ctype`. Both were read off the Go build rather than
+// invented -- the HTTP names are pinned by the acceptance suite, the sandbox
+// names by what a script written against the published guide expects.
+func fileSandboxJSON(f) (s) {
+  s = "{\"namespace\":" + jsonQuote(f.ns) + ",\"name\":" + jsonQuote(f.name) +
+      ",\"sha256\":" + jsonQuote(f.sha256) + ",\"size\":" + str(f.size) +
+      ",\"content_type\":" + jsonQuote(f.ctype) + ",\"metadata\":" + f.meta +
+      ",\"backend\":\"local\",\"created_at\":" + jsonQuote(f.created_at) +
+      ",\"updated_at\":" + jsonQuote(f.updated_at) + "}"
+}
+
+func listFilesSandbox(db, ns, limit, offset) (out) {
+  out = "[]"
+  rows := sqlite_query(db, "SELECT ns, name, sha256, size, ctype, meta, created_at, updated_at FROM files WHERE ns = ? ORDER BY name LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)", []string{ns, str(limit), str(offset)})
+  if rows == "[]" { return }
+  parsed := parse(rows, []FileRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, fileSandboxJSON(parsed[i]))
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
 }

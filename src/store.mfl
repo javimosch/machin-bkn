@@ -471,3 +471,33 @@ func listJSON(db, ns, coll, filters, orderBy, desc, limit, offset) (out) {
   if rows == "[]" { return }
   out = jsonString(rows, "[0].a", "[]")
 }
+
+type PairRow struct { a string  b string  c string }
+
+// listCollections answers what exists, so a caller that read an empty result
+// can tell "wrong name" from "nothing written yet" -- collections are created
+// on first write, so a typo makes a new empty one rather than an error.
+func listCollections(db, ns) (out) {
+  out = "[]"
+  rows := ""
+  if ns == "" {
+    rows = sqlite_query(db, "SELECT ns AS a, name AS b, created_at AS c FROM collections ORDER BY ns, name", []string{})
+  } else {
+    rows = sqlite_query(db, "SELECT ns AS a, name AS b, created_at AS c FROM collections WHERE ns = ? ORDER BY name", []string{ns})
+  }
+  if rows == "[]" { return }
+  parsed := parse(rows, []PairRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    p := parsed[i]
+    // The Go build answers {ref, count, created_at, normalize}; matched here
+    // rather than invented, so a script reading `.ref` works on both.
+    parts = append(parts, "{\"ref\":" + jsonQuote(p.a + "/" + p.b) +
+      ",\"count\":" + str(countDocs(db, p.a, p.b, []Filter{})) +
+      ",\"normalize\":" + normalizersOf(db, p.a, p.b) +
+      ",\"created_at\":" + jsonQuote(p.c) + "}")
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}

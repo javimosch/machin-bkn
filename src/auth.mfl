@@ -258,14 +258,14 @@ func addMember(db, orgRef, userRef, role) (err) {
 func membershipsOf(db, userID) (out, count) {
   out = "[]"
   count = 0
-  rows := sqlite_query(db, "SELECT m.org_id AS org_id, o.slug AS org_slug, m.user_id AS user_id, '' AS user_email, m.role AS role, m.created_at AS created_at FROM memberships m JOIN orgs o ON o.id = m.org_id WHERE m.user_id = ? ORDER BY o.slug", []string{userID})
+  rows := sqlite_query(db, "SELECT m.org_id AS org_id, o.slug AS org_slug, m.user_id AS user_id, u.email AS user_email, m.role AS role, m.created_at AS created_at FROM memberships m JOIN orgs o ON o.id = m.org_id JOIN users u ON u.id = m.user_id WHERE m.user_id = ? ORDER BY o.slug", []string{userID})
   if rows == "[]" { return }
   parsed := parse(rows, []MemberRow{})
   parts := []string{}
   i := 0
   while i < len(parsed) {
     m := parsed[i]
-    parts = append(parts, "{\"org_id\":" + jsonQuote(m.org_id) + ",\"org_slug\":" + jsonQuote(m.org_slug) + ",\"user_id\":" + jsonQuote(m.user_id) + ",\"role\":" + jsonQuote(m.role) + ",\"created_at\":" + jsonQuote(m.created_at) + "}")
+    parts = append(parts, "{\"org_id\":" + jsonQuote(m.org_id) + ",\"org_slug\":" + jsonQuote(m.org_slug) + ",\"user_id\":" + jsonQuote(m.user_id) + ",\"user_email\":" + jsonQuote(m.user_email) + ",\"role\":" + jsonQuote(m.role) + ",\"created_at\":" + jsonQuote(m.created_at) + "}")
     i = i + 1
   }
   out = "[" + join(parts, ",") + "]"
@@ -382,4 +382,96 @@ func meFromToken(db, token) (user, claims, err) {
   if u.disabled == 1 { err = "user is disabled"  return }
   user = userJSON(u)
   claims = parsed
+}
+
+// The read/write half of the identity surface that the sandbox needs and the
+// HTTP routes never did. Shapes here match the Go build's sandbox, which was
+// read off a running binary rather than guessed: memberships carry user_email
+// as well as user_id, and the mutations answer a boolean.
+
+func listMembers(db, orgRef) (out, err) {
+  out = "[]"
+  err = ""
+  o, found := findOrg(db, orgRef)
+  if !found { err = "organization not found"  return }
+  rows := sqlite_query(db, "SELECT m.org_id AS org_id, o.slug AS org_slug, m.user_id AS user_id, u.email AS user_email, m.role AS role, m.created_at AS created_at FROM memberships m JOIN orgs o ON o.id = m.org_id JOIN users u ON u.id = m.user_id WHERE m.org_id = ? ORDER BY u.email", []string{o.id})
+  if rows == "[]" { return }
+  parsed := parse(rows, []MemberRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    m := parsed[i]
+    parts = append(parts, "{\"org_id\":" + jsonQuote(m.org_id) + ",\"org_slug\":" + jsonQuote(m.org_slug) + ",\"user_id\":" + jsonQuote(m.user_id) + ",\"user_email\":" + jsonQuote(m.user_email) + ",\"role\":" + jsonQuote(m.role) + ",\"created_at\":" + jsonQuote(m.created_at) + "}")
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}
+
+func removeMember(db, orgRef, userRef) (ok, err) {
+  ok = false
+  err = ""
+  o, orgFound := findOrg(db, orgRef)
+  if !orgFound { err = "organization not found"  return }
+  u, userFound := findUser(db, userRef)
+  if !userFound { err = "user not found"  return }
+  sqlite_exec(db, "DELETE FROM memberships WHERE org_id = ? AND user_id = ?", []string{o.id, u.id})
+  ok = true
+}
+
+// updateUser changes only the fields named. Changing a password or disabling
+// an account revokes that user's sessions immediately -- the contract says so,
+// and a password change that leaves live sessions behind is not a password
+// change.
+func updateUser(db, idOrEmail, name, role, password, disabled, setDisabled) (user, err) {
+  user = emptyUser()
+  err = ""
+  u, found := findUser(db, idOrEmail)
+  if !found { err = "user not found"  return }
+  revoke := false
+  if name != "" { sqlite_exec(db, "UPDATE users SET name = ?, updated_at = ? WHERE id = ?", []string{name, nowStamp(), u.id}) }
+  if role != "" {
+    if role != "user" { if role != "admin" { err = "role must be user or admin"  return } }
+    sqlite_exec(db, "UPDATE users SET role = ?, updated_at = ? WHERE id = ?", []string{role, nowStamp(), u.id})
+  }
+  if password != "" {
+    if len(password) < 8 { err = "password must be at least 8 characters"  return }
+    ph, phErr := hashPassword(password)
+    if phErr != "" { err = phErr  return }
+    sqlite_exec(db, "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", []string{ph, nowStamp(), u.id})
+    revoke = true
+  }
+  if setDisabled {
+    d := 0
+    if disabled { d = 1  revoke = true }
+    sqlite_exec(db, "UPDATE users SET disabled = CAST(? AS INTEGER), updated_at = ? WHERE id = ?", []string{str(d), nowStamp(), u.id})
+  }
+  if revoke { sqlite_exec(db, "DELETE FROM sessions WHERE user_id = ?", []string{u.id}) }
+  user, _ = findUser(db, u.id)
+}
+
+func deleteUser(db, idOrEmail) (ok) {
+  ok = false
+  u, found := findUser(db, idOrEmail)
+  if !found { return }
+  sqlite_exec(db, "DELETE FROM sessions WHERE user_id = ?", []string{u.id})
+  sqlite_exec(db, "DELETE FROM memberships WHERE user_id = ?", []string{u.id})
+  sqlite_exec(db, "DELETE FROM users WHERE id = ?", []string{u.id})
+  ok = true
+}
+
+// roleAtLeast answers the org-role hierarchy: owner > admin > member. An
+// unknown role ranks 0, so a typo denies rather than grants -- the direction
+// an access check should fail in.
+func orgRoleRank(r) (n) {
+  n = 0
+  if r == "member" { n = 1 }
+  if r == "admin" { n = 2 }
+  if r == "owner" { n = 3 }
+}
+
+func roleAtLeast(have, want) (ok) {
+  ok = false
+  wantRank := orgRoleRank(want)
+  if wantRank == 0 { return }
+  ok = orgRoleRank(have) >= wantRank
 }

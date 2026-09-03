@@ -140,3 +140,21 @@ func listLocks(db) (out) {
   }
   out = "[" + join(parts, ",") + "]"
 }
+
+// renewLock extends a lease the caller still holds. A lock is a lease with an
+// expiry so a crashed holder cannot block the work forever, which means a run
+// that outlives its TTL loses the lock while still going: renewing is how a
+// long job keeps it. Only the recorded owner may extend it.
+func renewLock(db, key, owner, ttl) (ok) {
+  ok = false
+  if ttl <= 0 { ttl = 300 }
+  ts := now()
+  sqlite_exec(db, "DELETE FROM locks WHERE expires_at <= CAST(? AS INTEGER)", []string{str(ts)})
+  rows := sqlite_query(db, "SELECT owner AS k, 0 AS n FROM locks WHERE key = ?", []string{key})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  if len(parsed) == 0 { return }
+  if parsed[0].k != owner { return }
+  sqlite_exec(db, "UPDATE locks SET expires_at = CAST(? AS INTEGER) WHERE key = ? AND owner = ?", []string{str(ts + ttl), key, owner})
+  ok = true
+}
