@@ -1,3 +1,5 @@
 src/gen_qjs.mfl
 vendor/.obj/
 vendor/libbknqjs.a
+blobs/
+bench/bench
