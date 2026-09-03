@@ -318,6 +318,33 @@ returns a value — see also the standing ask that `sqlite_query` return
 
 ---
 
+## 16. `--race-safe` does not see a machweb handler as a goroutine
+
+`--race-safe` reports a global written from two literal `go` statements. It does
+not report the same global written from inside a `serve(...)` handler, though
+every connection runs that body on its own thread (`mfl_go_run_1` in the emitted
+C, the same trampoline). `machin check --json` returns zero warnings too.
+
+That is the case that matters in a server, and it is why a heap-use-after-free in
+this repo's own ULID minter survived `check`, `--race-safe` and a 113-assertion
+suite before a benchmark killed the process at concurrency 2 on a public route.
+
+Filed as [machin#647](https://github.com/javimosch/machin/issues/647).
+
+The deeper half, noted there but not filed separately: a global assigned an
+arena-allocated value from inside a handler is a dangling pointer once that
+request's goroutine ends, because machin frees the goroutine's arena. That is
+the same class as [#310](https://github.com/javimosch/machin/issues/310), fixed
+by deep-copying `go` arguments at the arena boundary; assignment to a global
+looks like the untreated sibling.
+
+**The rule to carry forward when writing MFL:** a global holding
+arena-allocated memory (`var x = []int{}`, a string built at runtime, a
+closure env) is valid only for the goroutine that assigned it. Keep shared
+state in scalars, and serialize it -- there is no mutex and no buffered
+channel, so the lock is a keeper goroutine passing a token on an unbuffered
+channel.
+
 ## Filed upstream
 
 Two of these are structural rather than cosmetic — between them they let a
