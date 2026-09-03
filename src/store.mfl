@@ -141,3 +141,297 @@ type KeyRow struct { key string }
 func unescape(s) (out) {
   out = replace(replace(s, "\\\"", "\""), "\\\\", "\\")
 }
+
+// --- filters --------------------------------------------------------------
+
+type Filter struct { field string  op string  value string }
+
+// The contract types a filter value by how it LOOKS, not by the operator:
+// "price>20 compares numbers, status=true compares a boolean, name=20
+// compares the number 20 and not the string."
+func looksNumeric(s) (ok) {
+  ok = false
+  if len(s) == 0 { return }
+  i := 0
+  digits := 0
+  dots := 0
+  while i < len(s) {
+    c := substr(s, i, i+1)
+    if c == "-" {
+      if i != 0 { return }
+    } else {
+      if c == "." {
+        dots = dots + 1
+        if dots > 1 { return }
+      } else {
+        if c < "0" { return }
+        if c > "9" { return }
+        digits = digits + 1
+      }
+    }
+    i = i + 1
+  }
+  if digits > 0 { ok = true }
+}
+
+func sqlOperator(op) (s) {
+  s = "="
+  if op == "ne" { s = "!=" }
+  if op == "gt" { s = ">" }
+  if op == "gte" { s = ">=" }
+  if op == "lt" { s = "<" }
+  if op == "lte" { s = "<=" }
+}
+
+// bindExpr keeps the value a bound parameter and casts it in SQL. Binding is
+// []string only, and SQLite orders every number before every text, so a
+// number compared as text silently matches nothing.
+func bindExpr(value) (s) {
+  s = "?"
+  if looksNumeric(value) { s = "CAST(? AS REAL)" }
+  if value == "true" { s = "CAST(? AS INTEGER)" }
+  if value == "false" { s = "CAST(? AS INTEGER)" }
+}
+
+func bindValue(value) (s) {
+  s = value
+  if value == "true" { s = "1" }
+  if value == "false" { s = "0" }
+}
+
+// whereClause builds the predicate and the binds that go with it. The id is a
+// column rather than a document field, so a filter on it targets the column —
+// json_extract(doc,'$.id') is always NULL because the id is stripped on write.
+func whereClause(filters, rulesJSON) (sql, binds) {
+  sql = ""
+  binds = []string{}
+  i := 0
+  while i < len(filters) {
+    f := filters[i]
+    if f.op == "in" {
+      parts := split(f.value, ",")
+      placeholders := []string{}
+      // The path is ONE parameter for the whole IN list. Pushing it per value
+      // misaligns every bind after the first, which SQLite reports as a
+      // perfectly ordinary empty result.
+      if f.field != "id" { binds = append(binds, "$." + f.field) }
+      j := 0
+      while j < len(parts) {
+        v := trim(parts[j])
+        if v != "" {
+          placeholders = append(placeholders, bindExpr(v))
+          binds = append(binds, bindValue(normalizeOne(rulesJSON, f.field, v)))
+        }
+        j = j + 1
+      }
+      k := 0
+      clause := ""
+      while k < len(placeholders) {
+        if f.field == "id" {
+          if k == 0 { clause = "id IN (" } else { clause = clause + "," }
+        } else {
+          if k == 0 { clause = "json_extract(doc, ?) IN (" } else { clause = clause + "," }
+        }
+        clause = clause + placeholders[k]
+        k = k + 1
+      }
+      sql = sql + " AND " + clause + ")"
+      i = i + 1
+      continue
+    }
+    value := normalizeOne(rulesJSON, f.field, f.value)
+    if f.field == "id" {
+      sql = sql + " AND id " + sqlOperator(f.op) + " " + bindExpr(value)
+      binds = append(binds, bindValue(value))
+    } else {
+      sql = sql + " AND json_extract(doc, ?) " + sqlOperator(f.op) + " " + bindExpr(value)
+      binds = append(binds, "$." + f.field)
+      binds = append(binds, bindValue(value))
+    }
+    i = i + 1
+  }
+}
+
+// A normalizer applies to a filter value too, so a lookup finds what a
+// normalized write stored.
+func normalizeOne(rulesJSON, field, value) (out) {
+  out = value
+  rule := ruleFor(rulesJSON, field)
+  if rule == "lower" { out = to_lower(value) }
+  if rule == "upper" { out = to_upper(value) }
+  if rule == "trim" { out = trim(value) }
+  if rule == "trim_lower" { out = to_lower(trim(value)) }
+}
+
+// orderClause sorts by a document field, or by recency when none is given.
+// Records missing the field sort last in BOTH directions: SQLite puts NULL
+// first ascending, which would otherwise bury every populated row.
+func orderClause(field, desc) (sql, binds) {
+  binds = []string{}
+  dir := "ASC"
+  if desc { dir = "DESC" }
+  if field == "" {
+    sql = " ORDER BY updated_at " + dir + ", id " + dir
+    return
+  }
+  sql = " ORDER BY (json_extract(doc, ?) IS NULL), json_extract(doc, ?) " + dir + ", id " + dir
+  binds = append(binds, "$." + field)
+  binds = append(binds, "$." + field)
+}
+
+// --- documents ------------------------------------------------------------
+
+// A stored document never contains its own id: it is a column, and reads
+// merge it back under "id" so callers get one flat object.
+func stripID(db, doc) (out) {
+  out = doc
+  rows := sqlite_query(db, "SELECT json_remove(?, '$.id') AS d", []string{doc})
+  if rows != "[]" { out = jsonString(rows, "[0].d", doc) }
+}
+
+func withID(db, doc, id) (out) {
+  out = doc
+  rows := sqlite_query(db, "SELECT json_set(?, '$.id', ?) AS d", []string{doc, id})
+  if rows != "[]" { out = jsonString(rows, "[0].d", doc) }
+}
+
+// The caller may name the id explicitly, or carry it in the document body.
+// Neither given, one is minted.
+func resolveID(doc, explicit) (id) {
+  id = explicit
+  if id != "" { return }
+  v, e := json_get(doc, ".id")
+  if e == "" { id = unquote(v) }
+  if id == "" { id = newID() }
+}
+
+func isObject(db, doc) (ok) {
+  ok = false
+  rows := sqlite_query(db, "SELECT json_type(?) AS t", []string{doc})
+  if rows == "[]" { return }
+  if jsonString(rows, "[0].t", "") == "object" { ok = true }
+}
+
+func putDoc(db, ns, coll, explicitID, doc) (record, err) {
+  record = ""
+  err = ""
+  if !isObject(db, doc) { err = "document must be a JSON object"  return }
+  ensureCollection(db, ns, coll)
+
+  id := resolveID(doc, explicitID)
+  body := applyNormalizers(db, stripID(db, doc), normalizersOf(db, ns, coll))
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO records (ns, coll, id, doc, created_at, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ns, coll, id) DO UPDATE SET doc = excluded.doc, updated_at = excluded.updated_at", []string{ns, coll, id, body, stamp, stamp})
+  record = withID(db, body, id)
+}
+
+// putIfAbsent is the idempotency primitive: it reports whether it inserted,
+// and returns whatever is stored either way. A get-then-put has a window a
+// retry will eventually find.
+func putIfAbsent(db, ns, coll, explicitID, doc) (record, created, err) {
+  record = ""
+  created = false
+  err = ""
+  if !isObject(db, doc) { err = "document must be a JSON object"  return }
+  ensureCollection(db, ns, coll)
+
+  id := resolveID(doc, explicitID)
+  body := applyNormalizers(db, stripID(db, doc), normalizersOf(db, ns, coll))
+  stamp := nowStamp()
+  before := countAll(db, ns, coll)
+  sqlite_exec(db, "INSERT INTO records (ns, coll, id, doc, created_at, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ns, coll, id) DO NOTHING", []string{ns, coll, id, body, stamp, stamp})
+  if countAll(db, ns, coll) > before { created = true }
+  existing, found := getDoc(db, ns, coll, id)
+  if found { record = existing } else { record = withID(db, body, id) }
+}
+
+func countAll(db, ns, coll) (n) {
+  n = 0
+  rows := sqlite_query(db, "SELECT COUNT(*) AS c FROM records WHERE ns=? AND coll=?", []string{ns, coll})
+  if rows == "[]" { return }
+  v, e := json_get(rows, "[0].c")
+  if e == "" { n = int(parse(v, 0)) }
+}
+
+func getDoc(db, ns, coll, id) (record, found) {
+  record = ""
+  found = false
+  rows := sqlite_query(db, "SELECT json_set(doc, '$.id', id) AS d FROM records WHERE ns=? AND coll=? AND id=?", []string{ns, coll, id})
+  if rows == "[]" { return }
+  record = jsonString(rows, "[0].d", "")
+  if record != "" { found = true }
+}
+
+func deleteDoc(db, ns, coll, id) (found) {
+  found = false
+  _, exists := getDoc(db, ns, coll, id)
+  if !exists { return }
+  sqlite_exec(db, "DELETE FROM records WHERE ns=? AND coll=? AND id=?", []string{ns, coll, id})
+  found = true
+}
+
+// patchDoc shallow-merges: a nested object in the patch replaces the stored
+// one wholesale rather than being deep-merged. Ids are immutable, so the
+// patch cannot move a record.
+func patchDoc(db, ns, coll, id, patch) (record, found, err) {
+  record = ""
+  found = false
+  err = ""
+  if !isObject(db, patch) { err = "document must be a JSON object"  return }
+  current, exists := getDoc(db, ns, coll, id)
+  if !exists { return }
+
+  body := stripID(db, current)
+  clean := stripID(db, patch)
+  cell := "CASE type WHEN 'object' THEN json(value) WHEN 'array' THEN json(value) WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') ELSE value END"
+  sql := "SELECT json_group_object(key, " + cell + ") AS m FROM (SELECT key, value, type FROM json_each(?) WHERE key NOT IN (SELECT key FROM json_each(?)) UNION ALL SELECT key, value, type FROM json_each(?))"
+  rows := sqlite_query(db, sql, []string{body, clean, clean})
+  if rows == "[]" { err = "merge failed"  return }
+  merged := applyNormalizers(db, jsonString(rows, "[0].m", body), normalizersOf(db, ns, coll))
+
+  sqlite_exec(db, "UPDATE records SET doc=?, updated_at=? WHERE ns=? AND coll=? AND id=?", []string{merged, nowStamp(), ns, coll, id})
+  record = withID(db, merged, id)
+  found = true
+}
+
+// --- queries --------------------------------------------------------------
+
+func listDocs(db, ns, coll, filters, orderBy, desc, limit, offset) (rows) {
+  rules := normalizersOf(db, ns, coll)
+  where, whereBinds := whereClause(filters, rules)
+  order, orderBinds := orderClause(orderBy, desc)
+  if limit <= 0 { limit = 50 }
+
+  binds := []string{ns, coll}
+  i := 0
+  while i < len(whereBinds) { binds = append(binds, whereBinds[i])  i = i + 1 }
+  i = 0
+  while i < len(orderBinds) { binds = append(binds, orderBinds[i])  i = i + 1 }
+  binds = append(binds, str(limit))
+  binds = append(binds, str(offset))
+
+  sql := "SELECT json_set(doc, '$.id', id) AS d FROM records WHERE ns=? AND coll=?" + where + order + " LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)"
+  rows = sqlite_query(db, sql, binds)
+}
+
+func countDocs(db, ns, coll, filters) (n) {
+  n = 0
+  rules := normalizersOf(db, ns, coll)
+  where, whereBinds := whereClause(filters, rules)
+  binds := []string{ns, coll}
+  i := 0
+  while i < len(whereBinds) { binds = append(binds, whereBinds[i])  i = i + 1 }
+  rows := sqlite_query(db, "SELECT COUNT(*) AS c FROM records WHERE ns=? AND coll=?" + where, binds)
+  if rows == "[]" { return }
+  v, e := json_get(rows, "[0].c")
+  if e == "" { n = int(parse(v, 0)) }
+}
+
+func findDoc(db, ns, coll, filters) (record, found) {
+  record = ""
+  found = false
+  rows := listDocs(db, ns, coll, filters, "", true, 1, 0)
+  if rows == "[]" { return }
+  record = jsonString(rows, "[0].d", "")
+  if record != "" { found = true }
+}

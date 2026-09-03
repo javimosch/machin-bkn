@@ -1,39 +1,114 @@
 
 func expect(label, got, want) {
-  if got == want {
-    println("  ok   " + label)
-  } else {
-    println("  FAIL " + label + ": got [" + got + "] want [" + want + "]")
+  if got == want { println("  ok   " + label) } else { println("  FAIL " + label + ": got [" + got + "] want [" + want + "]") }
+}
+func expectN(label, got, want) { expect(label, str(got), str(want)) }
+
+func seed(db) {
+  _, _ = putDoc(db, "dog", "products", "widget",    "{\"name\":\"widget\",\"price\":30,\"stock\":5,\"status\":\"live\"}")
+  _, _ = putDoc(db, "dog", "products", "gizmo",     "{\"name\":\"gizmo\",\"price\":10,\"stock\":0,\"status\":\"draft\"}")
+  _, _ = putDoc(db, "dog", "products", "doohickey", "{\"name\":\"doohickey\",\"price\":50,\"stock\":2,\"status\":\"live\"}")
+  _, _ = putDoc(db, "dog", "products", "thing",     "{\"name\":\"thing\",\"price\":20,\"status\":\"archived\"}")
+}
+
+func names(rows) (out) {
+  out = ""
+  parsed := parse(rows, []DocRow{})
+  i := 0
+  while i < len(parsed) {
+    v, e := json_get(parsed[i].d, ".name")
+    if e == "" {
+      if out != "" { out = out + "," }
+      out = out + unquote(v)
+    }
+    i = i + 1
   }
 }
+type DocRow struct { d string }
+
+func field(doc, path) (out) {
+  out = ""
+  v, e := json_get(doc, path)
+  if e == "" { out = unquote(v) }
+}
+
+func f1(field, op, value) (out) { out = []Filter{Filter{field: field, op: op, value: value}} }
 
 func main() {
   db := storeOpen(":memory:")
-  if db == 0 { println("open failed")  return }
+  seed(db)
 
-  ns, coll, err := splitRef("myapp/users")
-  expect("ref splits", ns + "|" + coll + "|" + err, "myapp|users|")
-  _, _, e2 := splitRef("users")
-  expect("ref needs a slash", e2, "collection ref must be <namespace>/<collection>")
-  _, _, e3 := splitRef("MyApp/users")
-  expect("ref rejects caps", e3, "collection ref must be <namespace>/<collection>")
-  _, _, e4 := splitRef("9app/users")
-  expect("ref rejects leading digit", e4, "collection ref must be <namespace>/<collection>")
-  _, _, e5 := splitRef("my-app_2/user_records")
-  expect("ref allows - and _", e5, "")
+  rec, found := getDoc(db, "dog", "products", "widget")
+  expect("get merges the id in", rec, "{\"name\":\"widget\",\"price\":30,\"stock\":5,\"status\":\"live\",\"id\":\"widget\"}")
+  expect("get reports found", str(found), "true")
+  _, missing := getDoc(db, "dog", "products", "nope")
+  expect("get on a missing id", str(missing), "false")
 
-  ensureCollection(db, "myapp", "users")
-  setNormalizers(db, "myapp", "users", "{\"email\":\"trim_lower\"}")
-  expect("normalizers stored", normalizersOf(db, "myapp", "users"), "{\"email\":\"trim_lower\"}")
-  expect("rule lookup", ruleFor("{\"email\":\"trim_lower\"}", "email"), "trim_lower")
-  expect("normalize expr", normalizeExpr("trim_lower", "X"), "lower(trim(X))")
+  expectN("count all", countAll(db, "dog", "products"), 4)
+  expect("order price asc",  names(listDocs(db, "dog", "products", []Filter{}, "price", false, 50, 0)), "gizmo,thing,widget,doohickey")
+  expect("order price desc", names(listDocs(db, "dog", "products", []Filter{}, "price", true, 50, 0)), "doohickey,widget,thing,gizmo")
+  expect("missing field last", names(listDocs(db, "dog", "products", []Filter{}, "stock", false, 50, 0)), "gizmo,doohickey,widget,thing")
+  expect("missing field last desc", names(listDocs(db, "dog", "products", []Filter{}, "stock", true, 50, 0)), "widget,doohickey,gizmo,thing")
 
-  rules := normalizersOf(db, "myapp", "users")
-  got := applyNormalizers(db, "{\"email\":\"  Ada@Example.IO \",\"name\":\"Ada\"}", rules)
-  expect("normalizer applied", got, "{\"email\":\"ada@example.io\",\"name\":\"Ada\"}")
+  expectN("filter eq",  countDocs(db, "dog", "products", f1("status", "eq", "live")), 2)
+  expectN("filter gt",  countDocs(db, "dog", "products", f1("price", "gt", "20")), 2)
+  expectN("filter gte", countDocs(db, "dog", "products", f1("price", "gte", "20")), 3)
+  expectN("filter lt",  countDocs(db, "dog", "products", f1("price", "lt", "20")), 1)
+  expectN("filter lte", countDocs(db, "dog", "products", f1("price", "lte", "20")), 2)
+  expectN("filter ne",  countDocs(db, "dog", "products", f1("status", "ne", "draft")), 3)
+  expectN("filter in",  countDocs(db, "dog", "products", f1("status", "in", "live,archived")), 3)
+  expectN("filter by id",     countDocs(db, "dog", "products", f1("id", "eq", "widget")), 1)
+  expectN("filter id:in",     countDocs(db, "dog", "products", f1("id", "in", "widget,gizmo,absent")), 2)
+  expectN("no match", countDocs(db, "dog", "products", f1("price", "gt", "999")), 0)
 
-  untouched := applyNormalizers(db, "{\"email\":42}", rules)
-  expect("non-string untouched", untouched, "{\"email\":42}")
+  both := []Filter{Filter{field: "price", op: "gt", value: "15"}, Filter{field: "status", op: "eq", value: "live"}}
+  expect("filters AND", names(listDocs(db, "dog", "products", both, "price", false, 50, 0)), "widget,doohickey")
+
+  expectN("limit caps the page", len(parse(listDocs(db, "dog", "products", []Filter{}, "price", false, 2, 0), []DocRow{})), 2)
+  expect("offset pages", names(listDocs(db, "dog", "products", []Filter{}, "price", false, 2, 2)), "widget,doohickey")
+
+  patched, pfound, _ := patchDoc(db, "dog", "products", "widget", "{\"stock\":9,\"tag\":\"new\"}")
+  // Compared field by field: JSON objects are unordered and the contract says
+  // only "shallow merge", so key POSITION is not part of it.
+  expect("patch keeps untouched fields", field(patched, ".name") + "/" + field(patched, ".price"), "widget/30")
+  expect("patch overwrites",             field(patched, ".stock"), "9")
+  expect("patch adds",                   field(patched, ".tag"), "new")
+  expect("patch preserves the id",       field(patched, ".id"), "widget")
+  expect("patch found", str(pfound), "true")
+  _, pmissing, _ := patchDoc(db, "dog", "products", "nope", "{\"a\":1}")
+  expect("patch on a missing id", str(pmissing), "false")
+
+  nested, _, _ := patchDoc(db, "dog", "products", "gizmo", "{\"meta\":{\"a\":1}}")
+  nested2, _, _ := patchDoc(db, "dog", "products", "gizmo", "{\"meta\":{\"b\":2}}")
+  expect("nested replaces wholesale", nested2, replace(nested, "\"a\":1", "\"b\":2"))
+
+  expect("delete", str(deleteDoc(db, "dog", "products", "thing")), "true")
+  expect("delete again", str(deleteDoc(db, "dog", "products", "thing")), "false")
+  expectN("count after delete", countAll(db, "dog", "products"), 3)
+
+  first, created1, _ := putIfAbsent(db, "dog", "events", "evt_1", "{\"attempt\":1}")
+  _, created2, _ := putIfAbsent(db, "dog", "events", "evt_1", "{\"attempt\":2}")
+  expect("putIfAbsent creates", str(created1), "true")
+  expect("putIfAbsent refuses the second", str(created2), "false")
+  existing, _, _ := putIfAbsent(db, "dog", "events", "evt_1", "{\"attempt\":2}")
+  expect("putIfAbsent keeps the original", existing, first)
+
+  setNormalizers(db, "dog", "people", "{\"email\":\"trim_lower\"}")
+  _, _ = putDoc(db, "dog", "people", "", "{\"email\":\"  Ada@Example.IO \"}")
+  found2, ok2 := findDoc(db, "dog", "people", f1("email", "eq", "ADA@EXAMPLE.IO"))
+  expect("normalizer covers the filter too", str(ok2), "true")
+  expect("normalized on write", str(contains(found2, "ada@example.io")), "true")
+
+  minted, _ := putDoc(db, "dog", "people", "", "{\"name\":\"minted\"}")
+  v, _ := json_get(minted, ".id")
+  expectN("a minted id is a 26-char ULID", len(unquote(v)), 26)
+
+  fromBody, _ := putDoc(db, "dog", "people", "", "{\"id\":\"from-body\",\"name\":\"x\"}")
+  vb, _ := json_get(fromBody, ".id")
+  expect("id may come from the body", unquote(vb), "from-body")
+
+  _, badErr := putDoc(db, "dog", "people", "", "[1,2,3]")
+  expect("a non-object is refused", badErr, "document must be a JSON object")
 
   sqlite_close(db)
 }

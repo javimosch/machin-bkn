@@ -43,3 +43,59 @@ accurate but points at the symptom; for an agent arriving from Go, "machin
 infers parameter types; drop the annotation" would save a cycle. `pos 25` also
 does not line up with the offending token, which sent me looking at the
 `cflags` string first.
+
+## 4. `sqlite_query` has no error channel
+
+Every failure returns `[]` — a syntax error, an unknown function, a JSON parse
+failure inside the query — which is byte-identical to a successful query that
+matched no rows.
+
+```
+sqlite_query(db, "SELCT bad")                  -> []
+sqlite_query(db, "SELECT nonsense_function(1)") -> []
+```
+
+**Cost:** a shallow-merge query worked on `{"a":1,"b":2}` and returned `[]` on
+`{"a":"one"}`. The first instinct is to doubt the data, not the SQL. Later, an
+`IN` filter matched 2 rows instead of 3 because a bind was misaligned — again
+reported as an ordinary empty result.
+
+**Ask:** return the error. `json_get` and `http_request` are already
+multi-assign `(value, err)`; `sqlite_query` could be `(rows, err)` the same
+way. Without it, every SQL bug in an MFL program has the same symptom as no
+data, and bisecting the query by hand is the only tool.
+
+## 5. Binds are `[]string` only, and the failure is silent
+
+`sqlite_exec/query` take `[]string`. SQLite orders every number before every
+text, so `json_extract(doc,'$.price') > '20'` never matches — no error, just
+zero rows.
+
+Workaround: cast in SQL and keep the parameter bound — `> CAST(? AS REAL)`,
+`= CAST(? AS INTEGER)` for JSON booleans. Do **not** interpolate the value
+into the SQL string to dodge it.
+
+**Ask:** a typed bind (`[]any`, or a `bind_int`/`bind_float` helper) would
+remove a whole class of silently-wrong queries.
+
+## 6. A multi-return function cannot be called as a statement
+
+```
+putDoc(db, ns, coll, id, doc)
+  -> putDoc returns 2 values; use a multi-assignment (a, b := putDoc(...))
+```
+
+`_, _ = putDoc(...)` is required. The diagnostic is excellent — it names the
+fix — but the constraint is stricter than Go, where discarding all results of
+a call is allowed.
+
+## 7. A type mismatch is reported against the wrong name
+
+Passing a `bool` where a parameter was inferred as `string`:
+
+```
+error: type mismatch for 'rec' in "main": string vs bool — from "  FAIL " + label + ...
+```
+
+`rec` is an unrelated variable; the offending call was `expect(label, contains(...), true)`.
+The snippet in the message is the right clue, the name is not.

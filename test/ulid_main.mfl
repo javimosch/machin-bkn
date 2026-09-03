@@ -1,0 +1,17 @@
+
+func main() {
+  prev := ""
+  ok := true
+  i := 0
+  while i < 200 {
+    id := newID()
+    if len(id) != 26 { println("BAD LENGTH: " + id)  ok = false }
+    if prev != "" {
+      if id <= prev { println("NOT SORTED: " + prev + " then " + id)  ok = false }
+    }
+    prev = id
+    i = i + 1
+  }
+  if ok { println("ulid ok: 200 ids, 26 chars, strictly increasing") }
+  println("sample: " + newID())
+}
