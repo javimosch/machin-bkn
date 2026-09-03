@@ -114,8 +114,9 @@ point of doing it in machin.
 | files | 12 | pass |
 | runtime | 14 | pass |
 | stripe | 10 | pass |
+| forms | 11 | pass |
 
-73 of 113.
+84 of 113.
 
 ## The script sandbox
 
@@ -159,6 +160,13 @@ mbkn cron create dogtick --schedule '@every 3s' --script dogjob
 mbkn kv set stripe.webhook_secret whsec_dogfood
 mbkn script create stripe-webhook --file scripts/stripe-webhook.js
 mbkn hooks create stripe --script stripe-webhook
+mbkn store put forms/definitions --id dogcontact --data @scripts/forms/dogcontact.json
+mbkn store put forms/definitions --id dogwait --data @scripts/forms/dogwait.json
+mbkn kv set forms.export_password dog-export-secret
+mbkn script create forms --file scripts/forms.js
+mbkn script create waitlist-export --file scripts/waitlist-export.js
+mbkn hooks create forms --script forms --allow-origin https://dog.example --rate-limit 60
+mbkn hooks create exports --script waitlist-export --rate-limit 30
 BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
 ```
 

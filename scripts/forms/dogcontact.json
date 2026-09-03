@@ -1,0 +1,9 @@
+{
+  "title": "Contact",
+  "honeypot": "website",
+  "fields": [
+    { "name": "email",   "type": "email", "required": true },
+    { "name": "message", "type": "text",  "required": true, "max": 2000 },
+    { "name": "topic",   "type": "enum",  "required": false, "values": ["sales", "support", "other"] }
+  ]
+}

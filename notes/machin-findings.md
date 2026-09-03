@@ -250,3 +250,26 @@ failure *because the match succeeded*. It bit here first as
 `machin build --emit-c | grep -q` (read as "the compiler failed") and then
 again as `printf '%s' "$C" | grep -q` after capturing the output to avoid it.
 The fix is not to pipe at all: `[[ "$C" != *"needle"* ]]`.
+
+## 14. No `chr()`, so a character has to be built through `from_hex`
+
+Decoding a `\uXXXX` escape means materialising a character from a number, and
+MFL has no `chr()`. The way through is `bytes_str(from_hex(hex))`: render the
+code point's UTF-8 bytes as hex yourself, and let `from_hex` turn them back
+into a string.
+
+```
+func utf8Hex(cp) (h) {
+  if cp < 128 { h = hexByte(cp)  return }
+  if cp < 2048 { h = hexByte(192 + cp/64) + hexByte(128 + cp%64)  return }
+  h = hexByte(224 + cp/4096) + hexByte(128 + (cp/64)%64) + hexByte(128 + cp%64)
+}
+// bytes_str(from_hex(utf8Hex(10)))   == a newline
+// bytes_str(from_hex(utf8Hex(8364))) == the euro sign
+```
+
+This is the second time the missing `chr` has forced a workaround - the URL
+decoder in `src/http.mfl` uses a literal printable-ASCII table instead,
+because it only ever needs codes 32..126. `from_hex` is the general answer and
+the table should probably go. Note `bytes_str` stops at a NUL, so this cannot
+produce a zero byte.

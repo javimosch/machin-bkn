@@ -157,8 +157,128 @@ func errRes(status, kind, message) (r) {
   r = jsonRes(status, "{\"ok\":false,\"error\":{\"message\":" + jsonQuote(message) + ",\"type\":" + jsonQuote(kind) + "}}")
 }
 
+// --- JSON strings ---------------------------------------------------------
+//
+// A request body reaches a script inside a JSON document, so it has to be a
+// well-formed JSON string literal on the way in and be decoded exactly on the
+// way out. Escaping only quotes and backslashes is not enough: a body with a
+// newline in it — every pretty-printed webhook payload — would produce JSON
+// the sandbox cannot parse.
+
+func hexDigits() (s) { s = "0123456789abcdef" }
+
+func hexByte(n) (s) {
+  d := hexDigits()
+  s = substr(d, n / 16, n / 16 + 1) + substr(d, n % 16, n % 16 + 1)
+}
+
 func jsonQuote(s) (out) {
-  out = "\"" + replace(replace(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+  b := bytes(s)
+  parts := []string{}
+  i := 0
+  while i < len(b) {
+    c := byte_at(b, i)
+    if c == 34 {
+      parts = append(parts, "\\\"")
+    } else {
+      if c == 92 {
+        parts = append(parts, "\\\\")
+      } else {
+        if c == 10 {
+          parts = append(parts, "\\n")
+        } else {
+          if c == 13 {
+            parts = append(parts, "\\r")
+          } else {
+            if c == 9 {
+              parts = append(parts, "\\t")
+            } else {
+              if c < 32 {
+                parts = append(parts, "\\u00" + hexByte(c))
+              } else {
+                parts = append(parts, substr(s, i, i + 1))
+              }
+            }
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+  out = "\"" + join(parts, "") + "\""
+}
+
+// utf8Hex renders a code point as the hex of its UTF-8 bytes, so from_hex can
+// turn it back into a string. MFL has no chr(), and bytes_str stops at a NUL,
+// so this is the way to materialise a character from a \u escape.
+func utf8Hex(cp) (h) {
+  if cp < 128 { h = hexByte(cp)  return }
+  if cp < 2048 {
+    h = hexByte(192 + cp / 64) + hexByte(128 + cp % 64)
+    return
+  }
+  h = hexByte(224 + cp / 4096) + hexByte(128 + (cp / 64) % 64) + hexByte(128 + cp % 64)
+}
+
+func hexNibble(ch) (n) {
+  n = 0
+  d := index(hexDigits(), to_lower(ch))
+  if d >= 0 { n = d }
+}
+
+// jsonUnquote decodes a JSON string literal (quotes included) back to its
+// bytes. Scanned rather than replaced in sequence, because a literal
+// backslash followed by an n is not a newline.
+func jsonUnquote(lit) (out) {
+  out = ""
+  s := lit
+  if len(s) >= 2 {
+    if substr(s, 0, 1) == "\"" { s = substr(s, 1, len(s) - 1) }
+  }
+  i := 0
+  while i < len(s) {
+    ch := substr(s, i, i + 1)
+    if ch != "\\" {
+      out = out + ch
+      i = i + 1
+      continue
+    }
+    nxt := substr(s, i + 1, i + 2)
+    i = i + 2
+    if nxt == "n" { out = out + bytes_str(from_hex("0a"))  continue }
+    if nxt == "r" { out = out + bytes_str(from_hex("0d"))  continue }
+    if nxt == "t" { out = out + bytes_str(from_hex("09"))  continue }
+    if nxt == "b" { out = out + bytes_str(from_hex("08"))  continue }
+    if nxt == "f" { out = out + bytes_str(from_hex("0c"))  continue }
+    if nxt == "u" {
+      cp := hexNibble(substr(s, i, i + 1)) * 4096 + hexNibble(substr(s, i + 1, i + 2)) * 256 + hexNibble(substr(s, i + 2, i + 3)) * 16 + hexNibble(substr(s, i + 3, i + 4))
+      i = i + 4
+      // A surrogate pair is one character written as two escapes; decoding
+      // them separately yields two invalid ones.
+      if cp >= 55296 {
+        if cp < 56320 {
+          if substr(s, i, i + 2) == "\\u" {
+            lo := hexNibble(substr(s, i + 2, i + 3)) * 4096 + hexNibble(substr(s, i + 3, i + 4)) * 256 + hexNibble(substr(s, i + 4, i + 5)) * 16 + hexNibble(substr(s, i + 5, i + 6))
+            if lo >= 56320 {
+              if lo < 57344 {
+                cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+                i = i + 6
+                out = out + bytes_str(from_hex(utf8Hex4(cp)))
+                continue
+              }
+            }
+          }
+        }
+      }
+      out = out + bytes_str(from_hex(utf8Hex(cp)))
+      continue
+    }
+    out = out + nxt
+  }
+}
+
+func utf8Hex4(cp) (h) {
+  h = hexByte(240 + cp / 262144) + hexByte(128 + (cp / 4096) % 64) + hexByte(128 + (cp / 64) % 64) + hexByte(128 + cp % 64)
 }
 
 // --- auth -----------------------------------------------------------------

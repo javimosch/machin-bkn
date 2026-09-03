@@ -232,7 +232,7 @@ func hooksRoutes(req, q, segs) (res) {
   // stays a CSV; anything else is JSON.
   r := response(status, ctype, body)
   if has_prefix(body, "\"") {
-    if index(ctype, "json") < 0 { r = response(status, ctype, unescape(unquote(body))) }
+    if index(ctype, "json") < 0 { r = response(status, ctype, jsonUnquote(body)) }
   }
   if originAllowed(h.allow_origin, origin) { r = with_header(r, "Access-Control-Allow-Origin", origin) }
   res = r
