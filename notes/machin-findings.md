@@ -361,6 +361,29 @@ state in scalars, and serialize it -- there is no mutex and no buffered
 channel, so the lock is a keeper goroutine passing a token on an unbuffered
 channel.
 
+## 18. What went back upstream: framework/json.src
+
+`json_get` returns the raw token, so a string comes back quoted and escaped,
+and its own docs say to strip the quotes. The obvious `substr(raw, 1, len-1)`
+is wrong for any value containing an escape -- which is finding 9's bug in this
+repo, where the CSV export parsed as zero rows and any hook body with a newline
+produced JSON the sandbox could not parse.
+
+That made it the one piece worth giving back: every machin program touching
+JSON needs it, the guide currently invites the wrong workaround, and the
+implementation here was already written, broken, and debugged against a live
+suite.
+
+Sent as [machin#649](https://github.com/javimosch/machin/pull/649) --
+`json_quote` / `json_unquote` / `json_str`, pure MFL in `framework/json.src`
+next to `xml.src` and `flags.src`, 34 assertions wired into `make mfl-test`,
+plus a `json-strings` guide entry. No compiler change, so none of the
+self-hosting gates apply.
+
+Deliberately NOT sent: the ULID minter. It needs a lock machin has no primitive
+for (see finding 17's workaround), and id generation is an application concern
+rather than a language one -- `rand_bytes` plus a few lines gets you there.
+
 ## Filed upstream
 
 Two of these are structural rather than cosmetic — between them they let a
