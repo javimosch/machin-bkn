@@ -206,3 +206,104 @@ wrapper command line that contains it, so pkill kills the shell (exit 144)
 and the stale server survives. A surviving server is the failure mode that
 looks like a code regression: it holds the port, the new binary's bind fails,
 and the suite silently tests the *old* process against the *old* database.
+
+## Benchmark against the Go build, and the parity gaps it exposed
+
+`bench/` compares this build against `~/ai/bkn/bin/bkn` on one machine
+(8-core i5-11320H, both on loopback, both over the same fixture). `bench/setup.sh`
+seeds a database, `bench/run.sh` drives one implementation through seven
+scenarios, `bench/compare.sh` alternates the two across repetitions, and
+`bench/summarize.py` reduces to medians.
+
+Two harness rules that the numbers depend on:
+
+- **Interleave, don't run in blocks.** A first attempt measured Go's kv-get at
+  6.5k rps in one pass and 13.2k in the next on an unchanged binary. Whatever
+  drifts on this machine drifts across both if they take turns, and cancels in
+  the median.
+- **Assert the fixture before measuring.** `run.sh` refuses to start unless all
+  four probe routes return 200, and it records the blob hash and the hook's
+  output so the summary can show both servers produced the same answer. An
+  earlier version had no such check and would have reported the throughput of
+  404s: the MFL CLI has no `files put`, `set -e` aborted the seed there, and
+  half the fixture was missing.
+
+Medians of 5 interleaved repetitions, concurrency 8, 5s per scenario:
+
+| scenario | bkn rps | mfl rps | bkn p50 | mfl p50 | bkn p99 | mfl p99 |
+|---|---|---|---|---|---|---|
+| kv-get      | 10203 | 10514 | 0.34 ms | 0.69 ms |    3.7 ms |   2.2 ms |
+| store-get   |  7305 | 14108 | 0.56 ms | 0.48 ms |    5.7 ms |   1.7 ms |
+| store-list  |  2645 |  2662 | 2.62 ms | 2.80 ms |    9.6 ms |   7.2 ms |
+| store-query |  1603 |  1394 | 4.60 ms | 5.42 ms |   11.1 ms |  12.8 ms |
+| store-write |   219 |   136 | 4.19 ms | 38.3 ms | 1134.3 ms | 224.0 ms |
+| file-64k    |  6447 |  7552 | 0.64 ms | 0.97 ms |    5.0 ms |   2.8 ms |
+| hook-script |    80 |   n/a | 9.48 ms |     n/a | 2343.0 ms |     n/a |
+
+Cold start 21 ms vs 9 ms; idle RSS 17.2 MB vs 3.3 MB; binary 20.1 MB stripped
+and dynamically linked vs 7.8 MB static.
+
+The read paths are a wash to within the noise of this machine. The two real
+differences are the write path (Go is ~9x better at p50 and ~5x worse at p99 --
+Go absorbs writes and pays in a multi-second tail, this build spreads the same
+cost evenly) and the script path, which does not have a number at all:
+
+### The script path segfaults at concurrency 2
+
+Reproducible and hard. Two simultaneous requests to a hook kill the server:
+
+```
+c=1  pre_load_http=200  after=alive     requests=293  transport_errors=0
+c=2  pre_load_http=200  after=CRASHED   requests=298  transport_errors=12005
+c=3  pre_load_http=200  after=CRASHED   requests=63   transport_errors=143864
+```
+
+`wait` on the server reports 139, so SIGSEGV. This is on `/v1/hooks/<name>`,
+which is public and unauthenticated by design -- two concurrent callers take the
+process down. The Go build served the same load across all five repetitions
+without a single error.
+
+What is ruled out: the JSRuntime is created and freed per call
+(`vendor/bkn_qjs.c:157,216`), so it is not a shared-interpreter problem; and
+kv/store at concurrency 8 sustained ~10k rps for 25s on the same SQLite handle
+with zero errors, so the datastore handle is not it either. What is confirmed is
+the milder sibling symptom: `src/script.mfl:415-423` binds the run context in
+process globals (`gScriptDB`, `gScriptName`, `gScriptNet`) and zeroes them on
+exit, so overlapping runs clobber each other and produce
+`Error: no datastore bound to this run` -- the 500s seen at concurrency 8. The
+globals exist because the FFI boundary passes only two strings (`op`, `argsJSON`)
+with nowhere to put a per-run handle. The crash itself still needs a stack trace
+from an unstripped build to pin down.
+
+The acceptance suite never caught any of this because every assertion in it is a
+sequential `curl`. 113 of 113 says the contract is right; it says nothing about
+what happens when two callers arrive at once.
+
+### Surface divergences found while building the harness
+
+The sandbox differs from the Go build's in ways the gate could not see, because
+the scripts exercising it are ones written here, against this surface:
+
+| namespace | bkn (Go) | this build |
+|---|---|---|
+| `crypto` | `base64Decode base64Encode equal hash hmac randomHex` | `equal hmac randomHex sha256` |
+| `auth`   | 13 methods | `can me` |
+| `events` | `emit list prune stats` | `emit list prune` |
+| `files`  | `delete get list namespaces put show` | `delete get list put` |
+| `lock`   | `acquire release renew` | `acquire release` |
+| `store`  | `collections count delete find get list patch put putIfAbsent` | same minus `collections` |
+| `id`     | a function, `bkn.id()` | an object, `bkn.id.new()` |
+| `log`    | a function, `bkn.log(...)` | an object, `bkn.log.info(...)` |
+
+`crypto.hmac` agrees exactly with the Go build and with Python's
+`hmac.new(key, msg, sha256).hexdigest()`, which the suite does pin. Object key
+order does not: Go hands back sorted keys (a Go-map marshalling artifact), this
+build preserves insertion order, which is what the JS spec requires.
+`bench/bench-hook.js` sorts before hashing so both produce identical bytes.
+
+The CLI is also narrower than the Go one -- it implements the write and setup
+half the gate runbook needed, and not much else. Confirmed missing: `version`,
+`help-json`, `guide`, `store get|list|find|collections`, `files put|get|show|list`,
+`script run|test|runs`, `hooks test`, `events list|stats`, and the whole read
+side of `auth`. `help-json` and `guide` are the two the agent-first CLI contract
+actually requires.
