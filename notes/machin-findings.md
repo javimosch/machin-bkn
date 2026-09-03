@@ -315,3 +315,27 @@ The underlying gap is the same one as finding 12's: MFL is willing to carry
 on quietly. `sqlite_exec` should return a status, the way `sqlite_query`
 returns a value — see also the standing ask that `sqlite_query` return
 `(rows, err)`.
+
+---
+
+## Filed upstream
+
+Two of these are structural rather than cosmetic — between them they let a
+missing schema, an undefined function and a lost write all pass silently — and
+are now open against the machin repo:
+
+- **[javimosch/machin#645](https://github.com/javimosch/machin/issues/645)** —
+  finding 12: `check` only typechecks what is reachable from `main`. The issue
+  adds something the note did not have: `export func` *does* make `check`
+  inspect an otherwise-unreachable function, so roots are already pluggable
+  and the ask is just for `check --all`.
+- **[javimosch/machin#646](https://github.com/javimosch/machin/issues/646)** —
+  finding 15: `sqlite_exec` has no error channel, so a `SQLITE_BUSY` write
+  vanishes with exit 0. Includes a deterministic reproduction (hold the write
+  lock through a fifo so `sqlite3` stays alive — backgrounding
+  `sqlite3 "BEGIN IMMEDIATE;"` does *not* hold it, which is why the first two
+  attempts at a repro were confounded).
+
+The remaining thirteen are recorded here but not filed: most are papercuts
+with a clean workaround, and finding 4 (`sqlite_query` has no error channel)
+is folded into #646 as the same design point.
