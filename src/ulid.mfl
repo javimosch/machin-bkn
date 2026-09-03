@@ -1,0 +1,97 @@
+// ULID: 26 chars, Crockford base32, 48-bit millisecond timestamp + 80 bits of
+// randomness. The contract calls for ids that sort by creation time "including
+// within one millisecond", so the random field is incremented rather than
+// redrawn when two ids are minted in the same millisecond.
+var ulidLastMs = 0
+var ulidRand = []int{}
+
+func ulidCrockford() (s) { s = "0123456789ABCDEFGHJKMNPQRSTVWXYZ" }
+
+func ulidBumpRandom() {
+  i := 9
+  while i >= 0 {
+    ulidRand[i] = ulidRand[i] + 1
+    if ulidRand[i] < 256 { return }
+    ulidRand[i] = 0
+    i = i - 1
+  }
+}
+
+func ulidFreshRandom() {
+  b := rand_bytes(10)
+  ulidRand = []int{}
+  i := 0
+  while i < 10 {
+    ulidRand = append(ulidRand, byte_at(b, i))
+    i = i + 1
+  }
+  // leave headroom so a long burst inside one millisecond cannot carry into
+  // the timestamp field
+  ulidRand[0] = ulidRand[0] % 128
+}
+
+func newID() (out) {
+  ms := now_ms()
+  if ms == ulidLastMs {
+    ulidBumpRandom()
+  } else {
+    ulidLastMs = ms
+    ulidFreshRandom()
+  }
+
+  // 16 bytes: 6 of timestamp (big-endian) then 10 random
+  bytes := []int{}
+  i := 5
+  while i >= 0 {
+    shift := 1
+    j := 0
+    while j < i { shift = shift * 256  j = j + 1 }
+    bytes = append(bytes, (ms / shift) % 256)
+    i = i - 1
+  }
+  i = 0
+  while i < 10 { bytes = append(bytes, ulidRand[i])  i = i + 1 }
+
+  // 128 bits -> 26 base32 chars, high bits first
+  alphabet := ulidCrockford()
+  chars := []string{}
+  i = 0
+  while i < 26 { chars = append(chars, "0")  i = i + 1 }
+  acc := 0
+  bits := 0
+  pos := 25
+  i = 15
+  while i >= 0 {
+    shift := 1
+    j := 0
+    while j < bits { shift = shift * 2  j = j + 1 }
+    acc = acc + bytes[i] * shift
+    bits = bits + 8
+    while bits >= 5 {
+      chars[pos] = substr(alphabet, acc % 32, acc % 32 + 1)
+      pos = pos - 1
+      acc = acc / 32
+      bits = bits - 5
+    }
+    i = i - 1
+  }
+  if pos >= 0 { chars[pos] = substr(alphabet, acc % 32, acc % 32 + 1) }
+  out = join(chars, "")
+}
+
+func main() {
+  prev := ""
+  ok := true
+  i := 0
+  while i < 200 {
+    id := newID()
+    if len(id) != 26 { println("BAD LENGTH: " + id)  ok = false }
+    if prev != "" {
+      if id <= prev { println("NOT SORTED: " + prev + " then " + id)  ok = false }
+    }
+    prev = id
+    i = i + 1
+  }
+  if ok { println("ulid ok: 200 ids, 26 chars, strictly increasing") }
+  println("sample: " + newID())
+}

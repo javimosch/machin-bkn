@@ -1,0 +1,143 @@
+// store — namespaced document collections over SQLite.
+//
+// Documents live in a TEXT column and are filtered/sorted with JSON1, so a
+// collection needs no schema and a new field needs no migration. Nearly all
+// of the work happens in SQL: MFL has no generic JSON value (parse() wants a
+// type witness), so re-serialising a document in MFL would mean hand-rolling
+// a JSON model. SQLite already has one.
+
+func storeSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS collections (ns TEXT NOT NULL, name TEXT NOT NULL, normalize TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, PRIMARY KEY (ns, name)); CREATE TABLE IF NOT EXISTS records (ns TEXT NOT NULL, coll TEXT NOT NULL, id TEXT NOT NULL, doc TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, coll, id)); CREATE INDEX IF NOT EXISTS records_ns_coll ON records(ns, coll, updated_at DESC);"
+}
+
+func storeOpen(path) (db) {
+  db = sqlite_open(path)
+  if db == 0 { return }
+  sqlite_exec(db, storeSchema())
+}
+
+func nowStamp() (s) { s = time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ") }
+
+// --- refs -----------------------------------------------------------------
+
+// Both segments are lowercase, start with a letter, and may carry digits,
+// '-' and '_'. Validated here rather than trusted, because a ref reaches SQL.
+func validSegment(seg) (ok) {
+  ok = false
+  if len(seg) == 0 { return }
+  if len(seg) > 63 { return }
+  first := substr(seg, 0, 1)
+  if first < "a" { return }
+  if first > "z" { return }
+  i := 0
+  while i < len(seg) {
+    c := substr(seg, i, i+1)
+    good := false
+    if c >= "a" { if c <= "z" { good = true } }
+    if c >= "0" { if c <= "9" { good = true } }
+    if c == "-" { good = true }
+    if c == "_" { good = true }
+    if !good { return }
+    i = i + 1
+  }
+  ok = true
+}
+
+func splitRef(ref) (ns, coll, err) {
+  ns = ""
+  coll = ""
+  err = ""
+  at := index(ref, "/")
+  if at < 0 { err = "collection ref must be <namespace>/<collection>"  return }
+  ns = substr(ref, 0, at)
+  coll = substr(ref, at+1, len(ref))
+  if !validSegment(ns) { err = "collection ref must be <namespace>/<collection>"  return }
+  if !validSegment(coll) { err = "collection ref must be <namespace>/<collection>"  return }
+}
+
+// --- collections ----------------------------------------------------------
+
+func ensureCollection(db, ns, coll) {
+  sqlite_exec(db, "INSERT INTO collections (ns, name, normalize, created_at) VALUES (?,?,'{}',?) ON CONFLICT(ns, name) DO NOTHING", []string{ns, coll, nowStamp()})
+}
+
+func setNormalizers(db, ns, coll, rulesJSON) {
+  sqlite_exec(db, "INSERT INTO collections (ns, name, normalize, created_at) VALUES (?,?,?,?) ON CONFLICT(ns, name) DO UPDATE SET normalize = excluded.normalize", []string{ns, coll, rulesJSON, nowStamp()})
+}
+
+func normalizersOf(db, ns, coll) (rules) {
+  rules = "{}"
+  rows := sqlite_query(db, "SELECT normalize AS n FROM collections WHERE ns=? AND name=?", []string{ns, coll})
+  if rows == "[]" { return }
+  rules = jsonString(rows, "[0].n", "{}")
+}
+
+// jsonString pulls one string field out of a rows array. A document that has
+// round-tripped through sqlite_query sits inside a JSON array as a JSON
+// string, so its quotes are escaped; json_get hands back the RAW token, which
+// still carries both the surrounding quotes and the escaping.
+func jsonString(rows, path, fallback) (out) {
+  out = fallback
+  v, e := json_get(rows, path)
+  if e != "" { return }
+  out = unescape(unquote(v))
+}
+
+// json_get returns the RAW token, so a string comes back quoted.
+func unquote(v) (s) {
+  s = v
+  if len(s) >= 2 {
+    if substr(s, 0, 1) == "\"" { s = substr(s, 1, len(s)-1) }
+  }
+}
+
+// --- normalization --------------------------------------------------------
+
+// A rule is applied in SQL so the same expression serves both the write and
+// the filter value, which is what the contract requires: "applied on every
+// write AND to every filter value for that field".
+func normalizeExpr(rule, inner) (out) {
+  out = inner
+  if rule == "lower" { out = "lower(" + inner + ")" }
+  if rule == "upper" { out = "upper(" + inner + ")" }
+  if rule == "trim" { out = "trim(" + inner + ")" }
+  if rule == "trim_lower" { out = "lower(trim(" + inner + "))" }
+}
+
+func ruleFor(rulesJSON, field) (rule) {
+  rule = ""
+  v, e := json_get(rulesJSON, "." + field)
+  if e == "" { rule = unquote(v) }
+}
+
+// applyNormalizers rewrites a document's fields before it is stored. Only
+// strings are touched; SQLite's lower/upper/trim leave other types alone, but
+// json_type gates it anyway so a number is never rewritten to text.
+func applyNormalizers(db, doc, rulesJSON) (out) {
+  out = doc
+  if rulesJSON == "{}" { return }
+  fields := sqlite_query(db, "SELECT key FROM json_each(?)", []string{rulesJSON})
+  if fields == "[]" { return }
+  parsed := parse(fields, []KeyRow{})
+  i := 0
+  while i < len(parsed) {
+    field := parsed[i].key
+    rule := ruleFor(rulesJSON, field)
+    if rule != "" {
+      path := "$." + field
+      expr := normalizeExpr(rule, "json_extract(?, ?)")
+      sql := "SELECT CASE WHEN json_type(?, ?) = 'text' THEN json_set(?, ?, " + expr + ") ELSE ? END AS d"
+      rows := sqlite_query(db, sql, []string{out, path, out, path, out, path, out})
+      if rows != "[]" { out = jsonString(rows, "[0].d", out) }
+    }
+    i = i + 1
+  }
+}
+
+type KeyRow struct { key string }
+
+// A document round-tripping through sqlite_query comes back as a JSON string
+// INSIDE a JSON array, so its quotes and backslashes are escaped twice.
+func unescape(s) (out) {
+  out = replace(replace(s, "\\\"", "\""), "\\\\", "\\")
+}
