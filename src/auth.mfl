@@ -1,0 +1,385 @@
+// auth — identity: users, organizations, memberships, and tokens.
+//
+// PASSWORD HASHING DIVERGES from the reference on purpose. The contract's
+// prose says "a bcrypt password hash", but machin has no bcrypt and the
+// observable contract never exposes one — the acceptance suite only asserts
+// that a hash never appears in a response. pbkdf2-sha256 satisfies every
+// observable requirement. The consequence is named rather than hidden: the
+// two implementations cannot read each other's password hashes, so they
+// cannot share a users table. The stored form is self-describing precisely
+// so that is detectable rather than mysterious.
+
+func authSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS orgs (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS memberships (org_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (org_id, user_id)); CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, org TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '');"
+}
+
+func accessTTL() (n) { n = 900 }
+func refreshTTL() (n) { n = 2592000 }
+
+// --- email ----------------------------------------------------------------
+
+// One definition of what an email key looks like. The contract requires the
+// same normalization on write and on lookup.
+func normalizeEmail(e) (out) { out = to_lower(trim(e)) }
+
+func validEmail(e) (ok) {
+  ok = false
+  at := index(e, "@")
+  if at <= 0 { return }
+  local := substr(e, 0, at)
+  domain := substr(e, at+1, len(e))
+  if contains(local, " ") { return }
+  if contains(domain, " ") { return }
+  if contains(domain, "@") { return }
+  dot := index(domain, ".")
+  if dot <= 0 { return }
+  if dot >= len(domain) - 1 { return }
+  ok = true
+}
+
+// --- passwords ------------------------------------------------------------
+
+func hashPassword(plain) (hashed, err) {
+  hashed = ""
+  err = ""
+  if len(plain) < 8 { err = "password must be at least 8 characters"  return }
+  salt := rand_bytes(16)
+  dk := pbkdf2_sha256(bytes(plain), salt, 120000, 32)
+  hashed = "pbkdf2_sha256$120000$" + base64_encode_bytes(salt) + "$" + base64_encode_bytes(dk)
+}
+
+func verifyPassword(plain, stored) (ok) {
+  ok = false
+  parts := split(stored, "$")
+  if len(parts) != 4 { return }
+  if parts[0] != "pbkdf2_sha256" { return }
+  if !looksNumeric(parts[1]) { return }
+  iters := int(parse(parts[1], 0))
+  salt := base64_decode_bytes(parts[2])
+  dk := pbkdf2_sha256(bytes(plain), salt, iters, 32)
+  if base64_encode_bytes(dk) == parts[3] { ok = true }
+}
+
+// --- base64url ------------------------------------------------------------
+
+func b64url(b) (s) {
+  s = replace(replace(replace(base64_encode_bytes(b), "+", "-"), "/", "_"), "=", "")
+}
+
+func b64urlDecode(s) (b) {
+  std := replace(replace(s, "-", "+"), "_", "/")
+  pad := len(std) % 4
+  if pad == 2 { std = std + "==" }
+  if pad == 3 { std = std + "=" }
+  b = base64_decode_bytes(std)
+}
+
+// --- signing secret -------------------------------------------------------
+
+// Resolved lazily and kept in kv, so an unrelated command never provisions a
+// credential it will not use.
+func signingSecret(db) (secret) {
+  secret = env("BKN_AUTH_SECRET")
+  if secret != "" { return }
+  entry, found, _ := kvGet(db, "auth.jwt_secret")
+  if found {
+    secret = jsonField(entry, ".value")
+    if secret != "" { return }
+  }
+  secret = to_hex(rand_bytes(32))
+  _, err := kvSet(db, "auth.jwt_secret", secret, "encrypted", "token signing secret, generated on first use", false)
+  if err != "" {
+    _, _ = kvSet(db, "auth.jwt_secret", secret, "string", "token signing secret, generated on first use", false)
+  }
+}
+
+// --- JWT ------------------------------------------------------------------
+
+// The algorithm is pinned at both ends rather than read from the token, which
+// sidesteps the alg-confusion class of bug (alg:none, or an RSA public key
+// passed off as an HMAC secret).
+func signJWT(secret, claims) (token) {
+  header := b64url(bytes("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"))
+  payload := b64url(bytes(claims))
+  signing := header + "." + payload
+  sig := hmac_sha256_bytes(bytes(secret), bytes(signing))
+  token = signing + "." + b64url(sig)
+}
+
+func parseJWT(secret, token) (claims, err) {
+  claims = ""
+  err = ""
+  parts := split(token, ".")
+  if len(parts) != 3 { err = "token is malformed or its signature does not match"  return }
+
+  head := bytes_str(b64urlDecode(parts[0]))
+  if jsonField(head, ".alg") != "HS256" { err = "token is malformed or its signature does not match"  return }
+
+  expect := b64url(hmac_sha256_bytes(bytes(secret), bytes(parts[0] + "." + parts[1])))
+  if expect != parts[2] { err = "token is malformed or its signature does not match"  return }
+
+  claims = bytes_str(b64urlDecode(parts[1]))
+  expRaw := jsonField(claims, ".exp")
+  if expRaw != "" {
+    if looksNumeric(expRaw) {
+      if now() >= int(parse(expRaw, 0)) { err = "token has expired"  claims = ""  return }
+    }
+  }
+}
+
+// --- users ----------------------------------------------------------------
+
+type UserRow struct { id string  email string  password_hash string  name string  role string  disabled int  created_at string  updated_at string }
+
+func userJSON(u) (out) {
+  dis := "false"
+  if u.disabled == 1 { dis = "true" }
+  // The password hash never travels on a value handed to a caller.
+  out = "{\"id\":" + jsonQuote(u.id) + ",\"email\":" + jsonQuote(u.email) + ",\"name\":" + jsonQuote(u.name) + ",\"role\":" + jsonQuote(u.role) + ",\"disabled\":" + dis + ",\"created_at\":" + jsonQuote(u.created_at) + ",\"updated_at\":" + jsonQuote(u.updated_at) + "}"
+}
+
+func emptyUser() (u) { u = UserRow{id: "", email: "", password_hash: "", name: "", role: "user", disabled: 0, created_at: "", updated_at: ""} }
+
+func createUser(db, email, password, name, role) (user, err) {
+  user = ""
+  err = ""
+  normalized := normalizeEmail(email)
+  if !validEmail(normalized) { err = "email is not valid"  return }
+  if role == "" { role = "user" }
+  if role != "user" { if role != "admin" { err = "role must be one of: user, admin"  return } }
+  hashed, hashErr := hashPassword(password)
+  if hashErr != "" { err = hashErr  return }
+
+  _, exists := findUser(db, normalized)
+  if exists { err = "a user with that email already exists"  return }
+
+  id := newID()
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO users (id, email, password_hash, name, role, disabled, created_at, updated_at) VALUES (?,?,?,?,?,0,?,?)", []string{id, normalized, hashed, name, role, stamp, stamp})
+  u := emptyUser()
+  u.id = id
+  u.email = normalized
+  u.name = name
+  u.role = role
+  u.created_at = stamp
+  u.updated_at = stamp
+  user = userJSON(u)
+}
+
+// A lookup by id or by email; the email is normalized first, so any spelling
+// of the same address reaches the same row.
+func findUser(db, idOrEmail) (u, found) {
+  u = emptyUser()
+  found = false
+  rows := sqlite_query(db, "SELECT id, email, password_hash, name, role, disabled, created_at, updated_at FROM users WHERE id = ? OR email = ?", []string{idOrEmail, normalizeEmail(idOrEmail)})
+  if rows == "[]" { return }
+  parsed := parse(rows, []UserRow{})
+  if len(parsed) == 0 { return }
+  u = parsed[0]
+  found = true
+}
+
+func listUsers(db, limit, offset) (out, total) {
+  out = "[]"
+  total = 0
+  if limit <= 0 { limit = 50 }
+  rows := sqlite_query(db, "SELECT id, email, password_hash, name, role, disabled, created_at, updated_at FROM users ORDER BY created_at DESC, id DESC LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)", []string{str(limit), str(offset)})
+  if rows == "[]" { return }
+  parsed := parse(rows, []UserRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) { parts = append(parts, userJSON(parsed[i]))  i = i + 1 }
+  out = "[" + join(parts, ",") + "]"
+  total = len(parsed)
+}
+
+// --- orgs and memberships -------------------------------------------------
+
+type OrgRow struct { id string  slug string  name string  created_at string }
+type MemberRow struct { org_id string  org_slug string  user_id string  user_email string  role string  created_at string }
+
+func createOrg(db, slug, name) (org, err) {
+  org = ""
+  err = ""
+  if !validSegment(slug) { err = "slug must match [a-z][a-z0-9_-]{0,62}"  return }
+  if name == "" { name = slug }
+  _, exists := findOrg(db, slug)
+  if exists { err = "an organization with that slug already exists"  return }
+  id := newID()
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO orgs (id, slug, name, created_at) VALUES (?,?,?,?)", []string{id, slug, name, stamp})
+  org = "{\"id\":" + jsonQuote(id) + ",\"slug\":" + jsonQuote(slug) + ",\"name\":" + jsonQuote(name) + ",\"created_at\":" + jsonQuote(stamp) + "}"
+}
+
+func findOrg(db, idOrSlug) (o, found) {
+  o = OrgRow{id: "", slug: "", name: "", created_at: ""}
+  found = false
+  rows := sqlite_query(db, "SELECT id, slug, name, created_at FROM orgs WHERE id = ? OR slug = ?", []string{idOrSlug, idOrSlug})
+  if rows == "[]" { return }
+  parsed := parse(rows, []OrgRow{})
+  if len(parsed) == 0 { return }
+  o = parsed[0]
+  found = true
+}
+
+func listOrgs(db) (out) {
+  out = "[]"
+  rows := sqlite_query(db, "SELECT id, slug, name, created_at FROM orgs ORDER BY slug")
+  if rows == "[]" { return }
+  parsed := parse(rows, []OrgRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    o := parsed[i]
+    parts = append(parts, "{\"id\":" + jsonQuote(o.id) + ",\"slug\":" + jsonQuote(o.slug) + ",\"name\":" + jsonQuote(o.name) + ",\"created_at\":" + jsonQuote(o.created_at) + "}")
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}
+
+func validOrgRole(r) (ok) {
+  ok = false
+  if r == "owner" { ok = true }
+  if r == "admin" { ok = true }
+  if r == "member" { ok = true }
+}
+
+func addMember(db, orgRef, userRef, role) (err) {
+  err = ""
+  if role == "" { role = "member" }
+  if !validOrgRole(role) { err = "role must be one of: owner, admin, member"  return }
+  o, orgFound := findOrg(db, orgRef)
+  if !orgFound { err = "organization not found"  return }
+  u, userFound := findUser(db, userRef)
+  if !userFound { err = "user not found"  return }
+  sqlite_exec(db, "INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?,?,?,?) ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role", []string{o.id, u.id, role, nowStamp()})
+}
+
+func membershipsOf(db, userID) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, "SELECT m.org_id AS org_id, o.slug AS org_slug, m.user_id AS user_id, '' AS user_email, m.role AS role, m.created_at AS created_at FROM memberships m JOIN orgs o ON o.id = m.org_id WHERE m.user_id = ? ORDER BY o.slug", []string{userID})
+  if rows == "[]" { return }
+  parsed := parse(rows, []MemberRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    m := parsed[i]
+    parts = append(parts, "{\"org_id\":" + jsonQuote(m.org_id) + ",\"org_slug\":" + jsonQuote(m.org_slug) + ",\"user_id\":" + jsonQuote(m.user_id) + ",\"role\":" + jsonQuote(m.role) + ",\"created_at\":" + jsonQuote(m.created_at) + "}")
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+  count = len(parsed)
+}
+
+func membershipRole(db, orgID, userID) (role, found) {
+  role = ""
+  found = false
+  rows := sqlite_query(db, "SELECT role FROM memberships WHERE org_id = ? AND user_id = ?", []string{orgID, userID})
+  if rows == "[]" { return }
+  role = jsonField(rows, "[0].role")
+  if role != "" { found = true }
+}
+
+// --- sessions -------------------------------------------------------------
+
+// A refresh token is a bearer credential with a long life, so only its digest
+// is stored: reading the database must not yield working sessions.
+func hashToken(t) (h) { h = sha256(t) }
+
+func issueTokens(db, u, orgRef) (tokens, err) {
+  tokens = ""
+  err = ""
+  orgSlug := ""
+  orgRole := ""
+  if orgRef != "" {
+    o, orgFound := findOrg(db, orgRef)
+    if !orgFound { err = "organization not found"  return }
+    role, member := membershipRole(db, o.id, u.id)
+    if !member { err = "user is not a member of that organization"  return }
+    orgSlug = o.slug
+    orgRole = role
+  }
+
+  sessionID := newID()
+  issued := now()
+  claims := "{\"sub\":" + jsonQuote(u.id) + ",\"email\":" + jsonQuote(u.email) + ",\"role\":" + jsonQuote(u.role) + ",\"org\":" + jsonQuote(orgSlug) + ",\"org_role\":" + jsonQuote(orgRole) + ",\"iat\":" + str(issued) + ",\"exp\":" + str(issued + accessTTL()) + ",\"jti\":" + jsonQuote(sessionID) + "}"
+  access := signJWT(signingSecret(db), claims)
+  refresh := b64url(rand_bytes(32))
+
+  sqlite_exec(db, "INSERT INTO sessions (id, user_id, token_hash, org, expires_at, created_at) VALUES (?,?,?,?,?,?)", []string{sessionID, u.id, hashToken(refresh), orgSlug, time_format_utc(issued + refreshTTL(), "%Y-%m-%dT%H:%M:%SZ"), nowStamp()})
+
+  tokens = "{\"access_token\":" + jsonQuote(access) + ",\"refresh_token\":" + jsonQuote(refresh) + ",\"token_type\":\"Bearer\",\"expires_in\":" + str(accessTTL()) + ",\"user\":" + userJSON(u) + ",\"org\":" + jsonQuote(orgSlug) + ",\"org_role\":" + jsonQuote(orgRole) + "}"
+}
+
+func login(db, email, password, orgRef) (tokens, err) {
+  tokens = ""
+  err = ""
+  u, found := findUser(db, email)
+  if !found {
+    // Verify against a dummy hash anyway, so a missing account and a wrong
+    // password take comparable time. Latency otherwise tells an attacker
+    // which addresses are registered.
+    _ = verifyPassword(password, "pbkdf2_sha256$120000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    err = "email or password is incorrect"
+    return
+  }
+  if !verifyPassword(password, u.password_hash) { err = "email or password is incorrect"  return }
+  if u.disabled == 1 { err = "user is disabled"  return }
+  tokens, err = issueTokens(db, u, orgRef)
+}
+
+type SessionRow struct { id string  user_id string  org string  expires_at string  revoked_at string }
+
+func lookupSession(db, refresh) (s, found) {
+  s = SessionRow{id: "", user_id: "", org: "", expires_at: "", revoked_at: ""}
+  found = false
+  rows := sqlite_query(db, "SELECT id, user_id, org, expires_at, revoked_at FROM sessions WHERE token_hash = ?", []string{hashToken(refresh)})
+  if rows == "[]" { return }
+  parsed := parse(rows, []SessionRow{})
+  if len(parsed) == 0 { return }
+  s = parsed[0]
+  if s.revoked_at != "" { return }
+  if s.expires_at <= nowStamp() { return }
+  found = true
+}
+
+// Rotation is unconditional: a refresh token is single-use, so a stolen one
+// stops working the moment the legitimate holder refreshes.
+func refreshTokens(db, refresh, orgRef, useSessionOrg) (tokens, err) {
+  tokens = ""
+  err = ""
+  s, found := lookupSession(db, refresh)
+  if !found { err = "refresh token is unknown, revoked or expired"  return }
+  u, userFound := findUser(db, s.user_id)
+  if !userFound { err = "user not found"  return }
+  if u.disabled == 1 { err = "user is disabled"  return }
+
+  target := orgRef
+  if useSessionOrg { target = s.org }
+  tokens, err = issueTokens(db, u, target)
+  if err != "" { return }
+  sqlite_exec(db, "UPDATE sessions SET revoked_at = ? WHERE id = ?", []string{nowStamp(), s.id})
+}
+
+// Revoking an unknown or already-revoked token is a success: the caller's
+// goal — that this token stops working — is met either way.
+func logout(db, refresh) {
+  sqlite_exec(db, "UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at = ''", []string{nowStamp(), hashToken(refresh)})
+}
+
+// me resolves a token against the LIVE user record, so a disabled or deleted
+// account stops working before its access token expires.
+func meFromToken(db, token) (user, claims, err) {
+  user = ""
+  claims = ""
+  err = ""
+  parsed, parseErr := parseJWT(signingSecret(db), token)
+  if parseErr != "" { err = parseErr  return }
+  sub := jsonField(parsed, ".sub")
+  u, found := findUser(db, sub)
+  if !found { err = "user not found"  return }
+  if u.disabled == 1 { err = "user is disabled"  return }
+  user = userJSON(u)
+  claims = parsed
+}

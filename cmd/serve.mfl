@@ -61,6 +61,96 @@ func storeRoutes(req, q, segs) (res, handled) {
   res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
 }
 
+// authStatus maps an error message to the status and stable type the
+// contract's callers branch on.
+func authStatus(err) (status, kind) {
+  status = "500 Internal Server Error"
+  kind = "internal_error"
+  if err == "email or password is incorrect" { status = "401 Unauthorized"  kind = "bad_credentials" }
+  if err == "user is disabled" { status = "403 Forbidden"  kind = "user_disabled" }
+  if err == "refresh token is unknown, revoked or expired" { status = "401 Unauthorized"  kind = "session_invalid" }
+  if err == "organization not found" { status = "404 Not Found"  kind = "not_found" }
+  if err == "user not found" { status = "404 Not Found"  kind = "not_found" }
+  if err == "user is not a member of that organization" { status = "403 Forbidden"  kind = "not_a_member" }
+  if err == "token has expired" { status = "401 Unauthorized"  kind = "token_expired" }
+  if err == "token is malformed or its signature does not match" { status = "401 Unauthorized"  kind = "bad_token" }
+}
+
+func authRoutes(req, q, segs) (res) {
+  leaf := segs[2]
+
+  if leaf == "login" {
+    tokens, err := login(gDB, jsonField(req.body, ".email"), jsonField(req.body, ".password"), jsonField(req.body, ".org"))
+    if err != "" {
+      st, kind := authStatus(err)
+      res = errRes(st, kind, err)
+      return
+    }
+    res = jsonRes("200 OK", "{\"ok\":true,\"tokens\":" + tokens + "}")
+    return
+  }
+
+  if leaf == "refresh" {
+    tokens, err := refreshTokens(gDB, jsonField(req.body, ".refresh_token"), "", true)
+    if err != "" {
+      st, kind := authStatus(err)
+      res = errRes(st, kind, err)
+      return
+    }
+    res = jsonRes("200 OK", "{\"ok\":true,\"tokens\":" + tokens + "}")
+    return
+  }
+
+  if leaf == "switch-org" {
+    tokens, err := refreshTokens(gDB, jsonField(req.body, ".refresh_token"), jsonField(req.body, ".org"), false)
+    if err != "" {
+      st, kind := authStatus(err)
+      res = errRes(st, kind, err)
+      return
+    }
+    res = jsonRes("200 OK", "{\"ok\":true,\"tokens\":" + tokens + "}")
+    return
+  }
+
+  if leaf == "logout" {
+    logout(gDB, jsonField(req.body, ".refresh_token"))
+    res = jsonRes("200 OK", "{\"ok\":true,\"logged_out\":true}")
+    return
+  }
+
+  if leaf == "me" {
+    token := bearer(req)
+    if token == "" { res = errRes("401 Unauthorized", "not_authenticated", "missing bearer access token")  return }
+    user, claims, err := meFromToken(gDB, token)
+    if err != "" {
+      st, kind := authStatus(err)
+      res = errRes(st, kind, err)
+      return
+    }
+    memberships, count := membershipsOf(gDB, jsonField(user, ".id"))
+    _ = count
+    res = jsonRes("200 OK", "{\"ok\":true,\"user\":" + user + ",\"claims\":" + claims + ",\"memberships\":" + memberships + "}")
+    return
+  }
+
+  // Administering identities is operator work, not user work.
+  if !authed(req, gAdmin, gHost) {
+    res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
+    return
+  }
+  if leaf == "users" {
+    users, count := listUsers(gDB, qInt(q, "limit", 50), qInt(q, "offset", 0))
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"users\":" + users + "}")
+    return
+  }
+  if leaf == "orgs" {
+    orgs := listOrgs(gDB)
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(orgs)) + ",\"orgs\":" + orgs + "}")
+    return
+  }
+  res = errRes("404 Not Found", "not_found", "no such route")
+}
+
 func kvRoutes(req, q, segs) (res) {
   if len(segs) == 2 {
     // ?public=1 is the one unauthenticated listing; anything broader needs
@@ -143,6 +233,15 @@ func handle(req) (res) {
     }
   }
 
+  if len(segs) >= 3 {
+    if segs[0] == "v1" {
+      if segs[1] == "auth" {
+        res = authRoutes(req, q, segs)
+        return
+      }
+    }
+  }
+
   if len(segs) >= 2 {
     if segs[0] == "v1" {
       if segs[1] == "kv" {
@@ -169,6 +268,14 @@ func handle(req) (res) {
 }
 
 func main() {
+  a := args()
+  if len(a) > 1 {
+    if a[1] != "serve" {
+      code := runCLI(a)
+      if code != 0 { exit(code) }
+      return
+    }
+  }
   path := env("BKN_DATA")
   if path == "" { path = "bkn.db" }
   gAdmin = env("BKN_ADMIN_TOKEN")

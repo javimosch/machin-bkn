@@ -1,0 +1,60 @@
+
+// The subcommands the acceptance suites need for setup. Writing identities is
+// operator work, so there is no HTTP route for it.
+func runCLI(a) (code) {
+  code = 0
+  path := env("BKN_DATA")
+  if path == "" { path = "bkn.db" }
+  db := storeOpen(path)
+  if db == 0 { println("cannot open " + path)  code = 110  return }
+
+  if a[1] == "auth" {
+    if a[2] == "user" {
+      if a[3] == "create" {
+        password := ""
+        name := ""
+        i := 5
+        while i < len(a) {
+          if a[i] == "--password-stdin" { password = trim(read_stdin()) }
+          if a[i] == "--name" { if i+1 < len(a) { name = a[i+1] } }
+          if a[i] == "--password" { if i+1 < len(a) { password = a[i+1] } }
+          i = i + 1
+        }
+        user, err := createUser(db, a[4], password, name, "user")
+        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+        println("{\"ok\":true,\"user\":" + user + "}")
+        return
+      }
+    }
+    if a[2] == "org" {
+      if a[3] == "create" {
+        name := ""
+        i := 5
+        while i < len(a) {
+          if a[i] == "--name" { if i+1 < len(a) { name = a[i+1] } }
+          i = i + 1
+        }
+        org, err := createOrg(db, a[4], name)
+        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+        println("{\"ok\":true,\"org\":" + org + "}")
+        return
+      }
+    }
+    if a[2] == "member" {
+      if a[3] == "add" {
+        role := "member"
+        i := 6
+        while i < len(a) {
+          if a[i] == "--role" { if i+1 < len(a) { role = a[i+1] } }
+          i = i + 1
+        }
+        err := addMember(db, a[4], a[5], role)
+        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+        println("{\"ok\":true,\"membership\":{\"org\":" + jsonQuote(a[4]) + ",\"user\":" + jsonQuote(a[5]) + ",\"role\":" + jsonQuote(role) + "}}")
+        return
+      }
+    }
+  }
+  println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
+  code = 80
+}

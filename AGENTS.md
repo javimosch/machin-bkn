@@ -103,3 +103,32 @@ compiler, so it is pinned by a build-time check rather than trusted.
 Every MFL gap, bug or rough edge found while building this goes in
 `notes/machin-findings.md`, with a minimal reproduction. That is half the
 point of doing it in machin.
+
+## Score
+
+| suite | assertions | state |
+|---|---|---|
+| store | 16 | pass |
+| kv | 7 | pass |
+| auth | 14 | pass |
+
+37 of 113.
+
+## Gate runbook (auth needs CLI setup before the server starts)
+
+```bash
+export BKN_DATA=/tmp/mbkn.db BKN_AUTH_SECRET=... BKN_ENCRYPTION_KEY=$(openssl rand -hex 32)
+mbkn auth org create dogcorp --name "Dog Corp"
+echo -n dogfood-password-1 | mbkn auth user create ada@dog.io --password-stdin --name Ada
+echo -n dogfood-password-2 | mbkn auth user create bob@dog.io --password-stdin
+mbkn auth member add dogcorp ada@dog.io --role owner
+mbkn auth member add dogcorp bob@dog.io --role member
+BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
+```
+
+Killing a stale server: `pgrep -af mbkn`, then `kill <pid>`. Do **not** run
+`pkill -f <pattern>` from the agent's own shell — the pattern matches the
+wrapper command line that contains it, so pkill kills the shell (exit 144)
+and the stale server survives. A surviving server is the failure mode that
+looks like a code regression: it holds the port, the new binary's bind fails,
+and the suite silently tests the *old* process against the *old* database.
