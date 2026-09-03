@@ -30,6 +30,14 @@ nothing observable — the symbol is non-static either way — so it reads like 
 should produce a stable C name and does not. Mild: the mangled name works, but
 `export` implying a stable ABI name would be the intuitive behaviour.
 
+**Corrected while building the sandbox (see finding 13).** This was written
+from a spike where the function was already reachable from `main`, so `export`
+genuinely changed nothing. It is not decorative: `export func` marks a
+*reachability root* on native too, and without it dead-code elimination
+removes any function only C refers to, so the link fails. The half that stands
+is the naming complaint — `export` still yields the mangled `mfl_<name>_<n>`
+rather than a stable ABI name, which is why `build.sh` has to pin it.
+
 ## 3. Parameter type annotations are a parse error, and the message misleads
 
 `export func mfl_double(x int) (r int)` fails with:
@@ -122,7 +130,7 @@ surprises.
 `chr`, because the test's `main` never reached it. The error only surfaced
 when the server's `main` did.
 
-## 9. No `chr` builtin
+## 9. No `chr` builtin (see finding 14 for the general workaround)
 
 `charat(string, int) -> string` exists; the reverse does not. Percent-decoding
 a URL has no direct route. machin-bkn uses a literal table of printable ASCII
