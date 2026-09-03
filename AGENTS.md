@@ -228,31 +228,41 @@ Two harness rules that the numbers depend on:
   404s: the MFL CLI has no `files put`, `set -e` aborted the seed there, and
   half the fixture was missing.
 
-Medians of 5 interleaved repetitions, concurrency 8, 5s per scenario:
+Medians of 7 interleaved repetitions, concurrency 8, 5s per scenario, both
+implementations reseeded from the same fixture before every repetition:
 
 | scenario | bkn rps | mfl rps | bkn p50 | mfl p50 | bkn p99 | mfl p99 |
 |---|---|---|---|---|---|---|
-| kv-get      | 10203 | 10514 | 0.34 ms | 0.69 ms |    3.7 ms |   2.2 ms |
-| store-get   |  7305 | 14108 | 0.56 ms | 0.48 ms |    5.7 ms |   1.7 ms |
-| store-list  |  2645 |  2662 | 2.62 ms | 2.80 ms |    9.6 ms |   7.2 ms |
-| store-query |  1603 |  1394 | 4.60 ms | 5.42 ms |   11.1 ms |  12.8 ms |
-| store-write |   219 |   136 | 4.19 ms | 38.3 ms | 1134.3 ms | 224.0 ms |
-| file-64k    |  6447 |  7552 | 0.64 ms | 0.97 ms |    5.0 ms |   2.8 ms |
-| hook-script |    82 |    72 | 12.6 ms | 87.8 ms | 2239.8 ms | 509.3 ms |
+| kv-get      | 9319 | 6847 | 0.42 ms | 0.91 ms |    4.0 ms |   4.5 ms |
+| store-get   | 9879 | 9933 | 0.40 ms | 0.64 ms |    3.7 ms |   2.9 ms |
+| store-list  | 2635 | 2720 | 2.56 ms | 2.65 ms |   10.2 ms |   7.8 ms |
+| store-query | 1146 | 1379 | 6.18 ms | 5.32 ms |   19.4 ms |  14.4 ms |
+| store-write |  156 |  209 | 4.52 ms | 35.3 ms | 1439.8 ms | 134.4 ms |
+| file-64k    | 5377 | 6256 | 0.94 ms | 1.09 ms |    6.0 ms |   4.1 ms |
+| hook-script |   85 |   89 | 9.39 ms | 82.0 ms | 1997.2 ms | 235.5 ms |
 
-`hook-script` is the one row measured after the two concurrency fixes below;
-the rest predate them, and only this scenario was affected. It has the same
-shape as `store-write`: Go wins p50 by ~7x and loses p99 by ~4x. Both are
-dominated by the per-run history write, not by the JS engine -- serially (c=1)
-the two are within 2% of each other on p50.
+Zero failed requests on either side, in every scenario. Cold start 30 ms vs
+9 ms; idle RSS 17.1 MB vs 3.5 MB; binary 20.1 MB stripped and dynamically
+linked vs 7.8 MB static.
 
-Cold start 21 ms vs 9 ms; idle RSS 17.2 MB vs 3.3 MB; binary 20.1 MB stripped
-and dynamically linked vs 7.8 MB static.
+Two caveats on these numbers. The machine carried an ambient load average of
+7-10 from unrelated processes throughout, so the absolute rps figures are
+depressed and are **not** comparable with any other run; interleaving keeps the
+bkn-vs-mfl comparison fair, and that ratio is the part worth reading. And each
+repetition reseeds both databases, which the earlier run did not do -- without
+it `script_runs` grows by a row per hook call and the later repetitions measure
+a bigger database than the earlier ones, a drift interleaving cannot cancel
+because it accumulates on both sides at once.
 
-The read paths are a wash to within the noise of this machine. The two real
-differences are the write path (Go is ~9x better at p50 and ~5x worse at p99 --
-Go absorbs writes and pays in a multi-second tail, this build spreads the same
-cost evenly) and the script path, which does not have a number at all:
+The read paths are a wash: five of the seven scenarios sit inside the run-to-run
+spread, and `kv-get` is the only one where bkn is clearly ahead. The real
+difference is the two write-bearing paths, and they say the same thing twice.
+On `store-write` bkn is 8x better at p50 and 11x worse at p99; on `hook-script`
+9x better at p50 and 8x worse at p99. bkn absorbs a write and pays for it in a
+multi-second tail; this build spreads the same cost evenly and never spikes.
+Which is preferable is a product question, not a benchmark result -- but a
+1.4-second p99 on a webhook endpoint is the kind of thing that shows up as a
+provider timing out and retrying.
 
 ### The script path segfaulted at concurrency 2 (fixed)
 
