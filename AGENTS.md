@@ -111,8 +111,9 @@ point of doing it in machin.
 | store | 16 | pass |
 | kv | 7 | pass |
 | auth | 14 | pass |
+| files | 12 | pass |
 
-37 of 113.
+49 of 113.
 
 ## Gate runbook (auth needs CLI setup before the server starts)
 
@@ -123,11 +124,14 @@ echo -n dogfood-password-1 | mbkn auth user create ada@dog.io --password-stdin -
 echo -n dogfood-password-2 | mbkn auth user create bob@dog.io --password-stdin
 mbkn auth member add dogcorp ada@dog.io --role owner
 mbkn auth member add dogcorp bob@dog.io --role member
+mbkn files ns create dogpub --allow-type image/png --public
+mbkn files ns create dogpriv --allow-type text/html
 BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
 ```
 
-Killing a stale server: `pgrep -af mbkn`, then `kill <pid>`. Do **not** run
-`pkill -f <pattern>` from the agent's own shell — the pattern matches the
+Killing a stale server: `pgrep -x mbkn | xargs -r kill`. Do **not** match on
+the command line from the agent's own shell — neither `pkill -f <pattern>` nor
+`pgrep -af '<pattern>' | xargs kill` — the pattern matches the
 wrapper command line that contains it, so pkill kills the shell (exit 144)
 and the stale server survives. A surviving server is the failure mode that
 looks like a code regression: it holds the port, the new binary's bind fails,

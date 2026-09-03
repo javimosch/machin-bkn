@@ -1,0 +1,249 @@
+// files — content-addressed blob storage.
+//
+// The bytes live on disk under their own SHA-256; the database holds only
+// names pointing at a digest. Two consequences fall out of that and both are
+// contract, not incidental: identical uploads deduplicate, and no caller-
+// supplied filename ever reaches the filesystem. The digest is also the ETag,
+// so caching is free and correct.
+//
+// Everything here is bytes-typed end to end (read_bytes -> sha256_bytes ->
+// write_file_bytes -> ok_bytes). A string round trip would silently truncate
+// at the first NUL, which a PNG has at byte 8.
+
+func filesSchema() (s) {
+  s = "CREATE TABLE IF NOT EXISTS file_ns (name TEXT PRIMARY KEY, backend TEXT NOT NULL DEFAULT 'local', max_bytes INTEGER NOT NULL DEFAULT 0, allow_types TEXT NOT NULL DEFAULT '', public INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS files (ns TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, ctype TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, name)); CREATE INDEX IF NOT EXISTS files_sha ON files(sha256);"
+}
+
+func blobDir() (d) {
+  d = env("BKN_FILES_DIR")
+  if d == "" { d = "blobs" }
+}
+
+func blobPath(sha) (p) { p = blobDir() + "/" + sha }
+
+// hexOf renders a digest. There is no hex builtin for bytes, and bytes_str
+// would stop at the first zero byte in the digest, so it is done by hand.
+func hexOf(b) (out) {
+  digits := "0123456789abcdef"
+  out = ""
+  i := 0
+  while i < len(b) {
+    v := byte_at(b, i)
+    out = out + substr(digits, v / 16, v / 16 + 1) + substr(digits, v % 16, v % 16 + 1)
+    i = i + 1
+  }
+}
+
+// --- namespaces -----------------------------------------------------------
+
+type NsRow struct { name string  backend string  max_bytes int  allow_types string  public int  created_at string }
+
+func nsJSON(n) (s) {
+  s = "{\"name\":" + jsonQuote(n.name) + ",\"backend\":" + jsonQuote(n.backend) + ",\"max_bytes\":" + str(n.max_bytes) + ",\"allow_types\":" + typeListJSON(n.allow_types) + ",\"public\":"
+  if n.public == 1 { s = s + "true" } else { s = s + "false" }
+  s = s + ",\"created_at\":" + jsonQuote(n.created_at) + "}"
+}
+
+func typeListJSON(csv) (s) {
+  s = "[]"
+  if csv == "" { return }
+  parts := []string{}
+  for _, t := range split(csv, ",") {
+    if t != "" { parts = append(parts, jsonQuote(t)) }
+  }
+  s = "[" + join(parts, ",") + "]"
+}
+
+func createNs(db, name, backend, maxBytes, allowTypes, public) (out, err) {
+  out = ""
+  err = ""
+  if !validSegment(name) { err = "namespace must be lowercase and start with a letter"  return }
+  if backend == "" { backend = "local" }
+  if backend != "local" { err = "backend must be one of: local, s3"  return }
+  pub := "0"
+  if public { pub = "1" }
+  sqlite_exec(db, "INSERT INTO file_ns (name, backend, max_bytes, allow_types, public, created_at) VALUES (?,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),?) ON CONFLICT(name) DO UPDATE SET backend = excluded.backend, max_bytes = excluded.max_bytes, allow_types = excluded.allow_types, public = excluded.public", []string{name, backend, str(maxBytes), allowTypes, pub, nowStamp()})
+  n, _ := findNs(db, name)
+  out = nsJSON(n)
+}
+
+func findNs(db, name) (n, found) {
+  n = NsRow{name: "", backend: "", max_bytes: 0, allow_types: "", public: 0, created_at: ""}
+  found = false
+  rows := sqlite_query(db, "SELECT name, backend, max_bytes, allow_types, public, created_at FROM file_ns WHERE name = ?", []string{name})
+  if rows == "[]" { return }
+  parsed := parse(rows, []NsRow{})
+  if len(parsed) == 0 { return }
+  n = parsed[0]
+  found = true
+}
+
+func listNs(db) (out) {
+  out = "[]"
+  rows := sqlite_query(db, "SELECT name, backend, max_bytes, allow_types, public, created_at FROM file_ns ORDER BY name")
+  if rows == "[]" { return }
+  parsed := parse(rows, []NsRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, nsJSON(parsed[i]))
+    i = i + 1
+  }
+  out = "[" + join(parts, ",") + "]"
+}
+
+func deleteNs(db, name) (err) {
+  err = ""
+  _, found := findNs(db, name)
+  if !found { err = "namespace not found"  return }
+  if sqlite_query(db, "SELECT 1 AS n FROM files WHERE ns = ? LIMIT 1", []string{name}) != "[]" {
+    err = "namespace is not empty"
+    return
+  }
+  sqlite_exec(db, "DELETE FROM file_ns WHERE name = ?", []string{name})
+}
+
+// typeAllowed: an empty allow-list means the namespace takes anything. A
+// namespace that names its types refuses everything else, which is what keeps
+// an image bucket from becoming an HTML host.
+func typeAllowed(csv, ctype) (ok) {
+  ok = true
+  if csv == "" { return }
+  base := ctype
+  semi := index(base, ";")
+  if semi > 0 { base = substr(base, 0, semi) }
+  base = to_lower(trim(base))
+  for _, t := range split(csv, ",") {
+    if to_lower(trim(t)) == base { return }
+  }
+  ok = false
+}
+
+// --- files ----------------------------------------------------------------
+
+type FileRow struct { ns string  name string  sha256 string  size int  ctype string  meta string  created_at string  updated_at string }
+
+func fileJSON(f) (s) {
+  s = "{\"ns\":" + jsonQuote(f.ns) + ",\"name\":" + jsonQuote(f.name) + ",\"sha256\":" + jsonQuote(f.sha256) + ",\"size\":" + str(f.size) + ",\"ctype\":" + jsonQuote(f.ctype) + ",\"meta\":" + f.meta + ",\"created_at\":" + jsonQuote(f.created_at) + ",\"updated_at\":" + jsonQuote(f.updated_at) + "}"
+}
+
+func validFileName(name) (ok) {
+  ok = false
+  if name == "" { return }
+  if len(name) > 200 { return }
+  if index(name, "/") >= 0 { return }
+  if index(name, "\\") >= 0 { return }
+  if name == "." { return }
+  if name == ".." { return }
+  ok = true
+}
+
+// putFile writes the blob under its digest and points ns/name at it. The
+// write is unconditional: a blob is its own content, so re-writing identical
+// bytes is a no-op by definition and cheaper than checking first.
+func putFile(db, ns, name, body, ctype, meta) (out, err, kind) {
+  out = ""
+  err = ""
+  kind = ""
+  if !validFileName(name) { err = "file name must not be empty or contain a path separator"  kind = "validation_error"  return }
+  n, found := findNs(db, ns)
+  if !found { err = "namespace not found"  kind = "not_found"  return }
+  if ctype == "" { ctype = "application/octet-stream" }
+  if !typeAllowed(n.allow_types, ctype) {
+    err = "content type " + ctype + " is not allowed in namespace " + ns
+    kind = "type_refused"
+    return
+  }
+  if n.max_bytes > 0 {
+    if len(body) > n.max_bytes {
+      err = "file exceeds the namespace limit of " + str(n.max_bytes) + " bytes"
+      kind = "too_large"
+      return
+    }
+  }
+  if meta == "" { meta = "{}" }
+
+  sha := hexOf(sha256_bytes(body))
+  mkdir(blobDir())
+  if write_file_bytes(blobPath(sha), body) < 0 {
+    err = "cannot write the blob"
+    kind = "internal_error"
+    return
+  }
+  stamp := nowStamp()
+  sqlite_exec(db, "INSERT INTO files (ns, name, sha256, size, ctype, meta, created_at, updated_at) VALUES (?,?,?,CAST(? AS INTEGER),?,?,?,?) ON CONFLICT(ns, name) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, ctype = excluded.ctype, meta = excluded.meta, updated_at = excluded.updated_at", []string{ns, name, sha, str(len(body)), ctype, meta, stamp, stamp})
+  f, _ := findFile(db, ns, name)
+  out = fileJSON(f)
+}
+
+func findFile(db, ns, name) (f, found) {
+  f = FileRow{ns: "", name: "", sha256: "", size: 0, ctype: "", meta: "{}", created_at: "", updated_at: ""}
+  found = false
+  rows := sqlite_query(db, "SELECT ns, name, sha256, size, ctype, meta, created_at, updated_at FROM files WHERE ns = ? AND name = ?", []string{ns, name})
+  if rows == "[]" { return }
+  parsed := parse(rows, []FileRow{})
+  if len(parsed) == 0 { return }
+  f = parsed[0]
+  found = true
+}
+
+func listFiles(db, ns, limit, offset) (out, count) {
+  out = "[]"
+  count = 0
+  rows := sqlite_query(db, "SELECT ns, name, sha256, size, ctype, meta, created_at, updated_at FROM files WHERE ns = ? ORDER BY name LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)", []string{ns, str(limit), str(offset)})
+  if rows == "[]" { return }
+  parsed := parse(rows, []FileRow{})
+  parts := []string{}
+  i := 0
+  while i < len(parsed) {
+    parts = append(parts, fileJSON(parsed[i]))
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+// deleteFile releases one name. The blob outlives it whenever another name
+// still points at the same digest — that is the other half of dedup, and the
+// half that is easy to get wrong.
+func deleteFile(db, ns, name) (err) {
+  err = ""
+  f, found := findFile(db, ns, name)
+  if !found { err = "file not found"  return }
+  sqlite_exec(db, "DELETE FROM files WHERE ns = ? AND name = ?", []string{ns, name})
+  if sqlite_query(db, "SELECT 1 AS n FROM files WHERE sha256 = ? LIMIT 1", []string{f.sha256}) == "[]" {
+    remove(blobPath(f.sha256))
+  }
+}
+
+func readBlob(sha) (b) { b = read_file_bytes(blobPath(sha)) }
+
+// --- the serving posture --------------------------------------------------
+//
+// Uploaded bytes are hostile until proven otherwise. Only media renders in
+// place; everything else downloads. nosniff stops a browser from guessing a
+// friendlier type than the one we declared, and the CSP neuters any document
+// that does render.
+
+func inlineDisposition(ctype) (ok) {
+  ok = false
+  base := ctype
+  semi := index(base, ";")
+  if semi > 0 { base = substr(base, 0, semi) }
+  base = to_lower(trim(base))
+  if has_prefix(base, "image/") { ok = true }
+  if has_prefix(base, "video/") { ok = true }
+  if has_prefix(base, "audio/") { ok = true }
+  if base == "application/pdf" { ok = true }
+  if base == "image/svg+xml" { ok = false }
+}
+
+func fileHeaders(res, f) (out) {
+  disp := "attachment"
+  if inlineDisposition(f.ctype) { disp = "inline" }
+  out = with_header(res, "Content-Disposition", disp + "; filename=" + jsonQuote(f.name))
+  out = with_header(out, "X-Content-Type-Options", "nosniff")
+  out = with_header(out, "Content-Security-Policy", "default-src 'none'; sandbox")
+  out = with_header(out, "ETag", "\"" + f.sha256 + "\"")
+  out = with_header(out, "Cache-Control", "public, max-age=31536000, immutable")
+}

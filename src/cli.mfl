@@ -55,6 +55,41 @@ func runCLI(a) (code) {
       }
     }
   }
+  if a[1] == "files" {
+    if a[2] == "ns" {
+      if a[3] == "create" {
+        backend := "local"
+        maxBytes := 0
+        allow := []string{}
+        public := false
+        i := 5
+        while i < len(a) {
+          if a[i] == "--public" { public = true }
+          if a[i] == "--backend" { if i+1 < len(a) { backend = a[i+1] } }
+          if a[i] == "--max-bytes" { if i+1 < len(a) { maxBytes = parse_int(a[i+1]) } }
+          // repeatable: each --allow-type adds one type to the namespace
+          if a[i] == "--allow-type" { if i+1 < len(a) { allow = append(allow, a[i+1]) } }
+          i = i + 1
+        }
+        out, err := createNs(db, a[4], backend, maxBytes, join(allow, ","), public)
+        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+        println("{\"ok\":true,\"namespace\":" + out + "}")
+        return
+      }
+      if a[3] == "list" {
+        nss := listNs(db)
+        println("{\"ok\":true,\"count\":" + str(countArray(nss)) + ",\"namespaces\":" + nss + "}")
+        return
+      }
+      if a[3] == "delete" {
+        err := deleteNs(db, a[4])
+        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+        println("{\"ok\":true,\"deleted\":true}")
+        return
+      }
+    }
+  }
+
   println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
   code = 80
 }

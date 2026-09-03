@@ -141,3 +141,31 @@ Workaround: alias in SQL (`SELECT type AS kind`) and name the field `kind`,
 since `parse()` matches struct fields to column names. Worth a mention in the
 guide's gotchas next to the existing `lambda-and-builtin-names` entry, which
 covers the adjacent case (a function may not be named like a builtin).
+
+## 11. String slicing `s[a:b]` typechecks, then emits invalid C
+
+`machin check` accepts `base[0:semi]` where `base` is a string. Codegen then
+treats it as a *slice* expression and emits `mfl_subslice(_sl, 0, semi,
+sizeof(int64_t))` assigned to a `char *`, so `cc` fails with:
+
+```
+error: incompatible types when assigning to type 'char *' from type 'mfl_slice'
+```
+
+Reproduction:
+
+```
+func head(s, n) (out) {
+  out = s
+  if n > 0 { out = s[0:n] }
+}
+func main() { println(head("image/png; charset=x", 9)) }
+```
+
+`machin check` → ok. `machin build` → cc failure inside the generated C.
+
+Workaround: `substr(s, 0, n)`. The gap is that the failure surfaces from the C
+compiler with generated-code line numbers, not from the MFL frontend that
+already had the type information to reject it — the one place where MFL's
+"compile through C" leaks. Either the checker should reject slicing a string
+or codegen should lower it to `substr`.

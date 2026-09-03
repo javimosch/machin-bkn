@@ -151,6 +151,73 @@ func authRoutes(req, q, segs) (res) {
   res = errRes("404 Not Found", "not_found", "no such route")
 }
 
+func filesRoutes(req, q, segs) (res) {
+  // A private namespace answers 404, not 403: an unauthenticated caller
+  // should not be able to map which namespaces exist.
+  if len(segs) == 2 {
+    if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
+    nss := listNs(gDB)
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(nss)) + ",\"namespaces\":" + nss + "}")
+    return
+  }
+
+  ns := segs[2]
+  n, nsFound := findNs(gDB, ns)
+  isAdmin := authed(req, gAdmin, gHost)
+  if !nsFound {
+    if !isAdmin { res = errRes("404 Not Found", "not_found", "no such file")  return }
+    res = errRes("404 Not Found", "not_found", "namespace not found")
+    return
+  }
+
+  if len(segs) == 3 {
+    if !isAdmin { res = errRes("404 Not Found", "not_found", "no such file")  return }
+    files, count := listFiles(gDB, ns, qInt(q, "limit", 50), qInt(q, "offset", 0))
+    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"files\":" + files + "}")
+    return
+  }
+
+  name := segs[3]
+
+  if req.method == "POST" || req.method == "PUT" {
+    if !isAdmin { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
+    out, err, kind := putFile(gDB, ns, name, req.body_bytes, header(req, "content-type"), qGet(q, "meta"))
+    if err != "" {
+      status := "400 Bad Request"
+      if kind == "not_found" { status = "404 Not Found" }
+      if kind == "too_large" { status = "413 Payload Too Large" }
+      if kind == "type_refused" { status = "415 Unsupported Media Type" }
+      if kind == "internal_error" { status = "500 Internal Server Error" }
+      res = errRes(status, kind, err)
+      return
+    }
+    res = jsonRes("201 Created", "{\"ok\":true,\"file\":" + out + "}")
+    return
+  }
+
+  if req.method == "DELETE" {
+    if !isAdmin { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
+    err := deleteFile(gDB, ns, name)
+    if err != "" { res = errRes("404 Not Found", "not_found", err)  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"deleted\":true}")
+    return
+  }
+
+  if n.public != 1 {
+    if !isAdmin { res = errRes("404 Not Found", "not_found", "no such file")  return }
+  }
+  f, found := findFile(gDB, ns, name)
+  if !found { res = errRes("404 Not Found", "not_found", "no such file")  return }
+
+  // The digest is the ETag, so a conditional GET is exact rather than
+  // heuristic: same bytes, same tag, always.
+  if header(req, "if-none-match") == "\"" + f.sha256 + "\"" {
+    res = fileHeaders(response("304 Not Modified", f.ctype, ""), f)
+    return
+  }
+  res = fileHeaders(ok_bytes(f.ctype, readBlob(f.sha256)), f)
+}
+
 func kvRoutes(req, q, segs) (res) {
   if len(segs) == 2 {
     // ?public=1 is the one unauthenticated listing; anything broader needs
@@ -244,6 +311,10 @@ func handle(req) (res) {
 
   if len(segs) >= 2 {
     if segs[0] == "v1" {
+      if segs[1] == "files" {
+        res = filesRoutes(req, q, segs)
+        return
+      }
       if segs[1] == "kv" {
         res = kvRoutes(req, q, segs)
         return
