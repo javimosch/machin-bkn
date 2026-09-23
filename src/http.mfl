@@ -120,6 +120,14 @@ func filtersFrom(q) (out) {
     if k == "order_by" { reserved = true }
     if k == "order" { reserved = true }
     if k == "id_only" { reserved = true }
+    // A rollup's own parameters select the grouping, they are not field
+    // filters — without this ?by=status silently became "where by = status"
+    // and matched nothing.
+    if k == "by" { reserved = true }
+    if k == "by_limit" { reserved = true }
+    // Preconditions likewise qualify the write, not the query.
+    if k == "if" { reserved = true }
+    if k == "if-absent" { reserved = true }
     if !reserved {
       raw := q.vals[i]
       op := "eq"

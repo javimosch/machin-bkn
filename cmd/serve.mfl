@@ -14,6 +14,16 @@ func storeRoutes(req, q, segs) (res, handled) {
 
   if len(segs) == 4 {
     if req.method == "GET" {
+      // A rollup answers how many, not which — so it short-circuits the record
+      // listing entirely rather than decorating it.
+      by := qGet(q, "by")
+      if by != "" {
+        body, rstatus := rollupJSON(gDB, ns, coll, filtersFrom(q), by, qInt(q, "by_limit", 0))
+        if rstatus == 400 { res = errRes("400 Bad Request", "validation_error", "cannot group by " + by)  handled = true  return }
+        res = jsonRes("200 OK", body)
+        handled = true
+        return
+      }
       filters := filtersFrom(q)
       limit := qInt(q, "limit", 50)
       offset := qInt(q, "offset", 0)
@@ -48,7 +58,8 @@ func storeRoutes(req, q, segs) (res, handled) {
     return
   }
   if req.method == "PATCH" {
-    record, found, err := patchDoc(gDB, ns, coll, id, req.body)
+    record, found, err, status := patchDocIf(gDB, ns, coll, id, req.body, qGet(q, "if"), qGet(q, "if-absent"))
+    if status == 409 { res = errRes("409 Conflict", "precondition_failed", err)  return }
     if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
     if !found { res = errRes("404 Not Found", "not_found", "record not found")  return }
     res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")

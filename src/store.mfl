@@ -381,18 +381,141 @@ func deleteDoc(db, ns, coll, id) (found) {
   found = true
 }
 
+// --- atomic update operators (contract: "atomic_updates") -------------------
+//
+// A patch field may carry an operator instead of a value:
+//   {"stock":{"$inc":3}} {"note":{"$append":"ab"}} {"tags":{"$push":"x"}}
+//   {"holder":{"$setIfEmpty":"w1"}}
+// The new value is computed from the CURRENT one, so two concurrent patches do
+// not lose each other. Per the contract, only a single $-prefixed key makes an
+// operator — a plain object, or an object with two keys, is still a value.
+//
+// Returns the rewritten patch, plus a status: 0 fine, 400 malformed.
+
+type OpRow struct { key string  n int  op string  operand string  otype string }
+
+func rewriteOperators(db, body, patch) (out, status, msg) {
+    out = patch
+    status = 0
+    msg = ""
+    // Every patch key whose value is an object, with that object's key count,
+    // its first inner key and the operand. One query rather than a walk.
+    sql := "SELECT p.key AS key, (SELECT COUNT(*) FROM json_each(p.value)) AS n, " +
+           "COALESCE((SELECT i.key FROM json_each(p.value) i LIMIT 1), '') AS op, " +
+           // json_quote keeps the column TEXT whatever the operand's JSON type —
+           // a bare number would otherwise not map onto a string field — and it
+           // preserves the quoting sqlQuote depends on to tell them apart.
+           "COALESCE((SELECT json_quote(i.value) FROM json_each(p.value) i LIMIT 1), '') AS operand, " +
+           "COALESCE((SELECT i.type FROM json_each(p.value) i LIMIT 1), '') AS otype " +
+           "FROM json_each(?) p WHERE p.type = 'object'"
+    rows := sqlite_query(db, sql, []string{patch})
+    if rows == "[]" { return }
+    parsed := parse(rows, []OpRow{})
+    i := 0
+    while i < len(parsed) {
+        field := parsed[i].key
+        op := parsed[i].op
+        if parsed[i].n == 1 && len(op) > 1 && substr(op, 0, 1) == "$" {
+            operand := parsed[i].operand
+            otype := parsed[i].otype
+            path := "$." + field
+            expr := ""
+            if op == "$inc" {
+                // The operand and the stored value must both be numbers; the
+                // contract calls anything else a bad operand, not a coercion.
+                if otype != "integer" && otype != "real" {
+                    status = 400  msg = "operator $inc needs a numeric operand"  return
+                }
+                cur := sqlite_query(db, "SELECT COALESCE(json_type(?, ?), 'null') AS t", []string{body, path})
+                t := jsonString(cur, "[0].t", "null")
+                if t != "integer" && t != "real" && t != "null" {
+                    status = 400  msg = "operator $inc on a non-numeric field"  return
+                }
+                expr = "COALESCE(json_extract(?, ?), 0) + " + operand
+            } else if op == "$append" {
+                expr = "COALESCE(json_extract(?, ?), '') || " + sqlQuote(operand)
+            } else if op == "$push" {
+                // Absent or non-array becomes a fresh array, so the first push
+                // does not need the caller to have created one.
+                expr = "json_insert(CASE WHEN json_type(?, ?) = 'array' THEN json_extract(?, ?) ELSE json_array() END, '$[#]', " + sqlQuote(operand) + ")"
+            } else if op == "$setIfEmpty" {
+                expr = "CASE WHEN COALESCE(json_extract(?, ?), '') = '' THEN " + sqlQuote(operand) + " ELSE json_extract(?, ?) END"
+            } else {
+                status = 400  msg = "unknown operator " + op  return
+            }
+            binds := []string{out, path, body, path}
+            if op == "$push" || op == "$setIfEmpty" { binds = []string{out, path, body, path, body, path} }
+            q := "SELECT json_set(?, ?, " + expr + ") AS d"
+            r2 := sqlite_query(db, q, binds)
+            if r2 == "[]" { status = 400  msg = "operator " + op + " could not be applied"  return }
+            out = jsonString(r2, "[0].d", out)
+        }
+        i = i + 1
+    }
+}
+
+// sqlQuote renders an operand as a SQL literal. Operands come from a parsed
+// JSON document, so a string arrives already quoted with " — swap to '' and
+// double any embedded quote.
+func sqlQuote(v) (s) {
+    s = v
+    if len(s) >= 2 {
+        if substr(s, 0, 1) == "\"" { s = "'" + replace(substr(s, 1, len(s)-1), "'", "''") + "'" }
+    }
+}
+
+// --- preconditions (contract: "preconditions") ------------------------------
+//
+// ?if=field=value and ?if-absent=field are checked against the document being
+// written and ANDed. A failed precondition writes NOTHING. There is no OR.
+func preconditionsHold(db, body, ifExpr, ifAbsent) (ok) {
+    ok = true
+    if ifExpr != "" {
+        eq := index(ifExpr, "=")
+        if eq < 0 { ok = false  return }
+        f := substr(ifExpr, 0, eq)
+        want := substr(ifExpr, eq+1, len(ifExpr))
+        rows := sqlite_query(db, "SELECT COALESCE(json_extract(?, ?), '') AS v", []string{body, "$." + f})
+        if jsonString(rows, "[0].v", "") != want { ok = false  return }
+    }
+    if ifAbsent != "" {
+        rows2 := sqlite_query(db, "SELECT COALESCE(json_extract(?, ?), '') AS v", []string{body, "$." + ifAbsent})
+        if jsonString(rows2, "[0].v", "") != "" { ok = false  return }
+    }
+}
+
 // patchDoc shallow-merges: a nested object in the patch replaces the stored
 // one wholesale rather than being deep-merged. Ids are immutable, so the
 // patch cannot move a record.
 func patchDoc(db, ns, coll, id, patch) (record, found, err) {
+  record, found, err, _ = patchDocIf(db, ns, coll, id, patch, "", "")
+}
+
+// patchDocIf is patchDoc with the two guards the contract adds: operators,
+// which compute the new value from the current one, and preconditions, which
+// decide whether the write happens at all. status is 0, 400 or 409 so the HTTP
+// layer does not have to infer a code from an error string.
+func patchDocIf(db, ns, coll, id, patch, ifExpr, ifAbsent) (record, found, err, status) {
   record = ""
   found = false
   err = ""
-  if !isObject(db, patch) { err = "document must be a JSON object"  return }
+  status = 0
+  if !isObject(db, patch) { err = "document must be a JSON object"  status = 400  return }
   current, exists := getDoc(db, ns, coll, id)
   if !exists { return }
 
   body := stripID(db, current)
+  // Checked against the document being written, and ANDed. A failure writes
+  // nothing — which is what makes --if-absent a claim exactly once.
+  if !preconditionsHold(db, body, ifExpr, ifAbsent) {
+    err = "precondition failed"
+    status = 409
+    found = true
+    return
+  }
+  rewritten, opStatus, opMsg := rewriteOperators(db, body, patch)
+  if opStatus != 0 { err = opMsg  status = opStatus  found = true  return }
+  patch = rewritten
   clean := stripID(db, patch)
   cell := "CASE type WHEN 'object' THEN json(value) WHEN 'array' THEN json(value) WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') ELSE value END"
   sql := "SELECT json_group_object(key, " + cell + ") AS m FROM (SELECT key, value, type FROM json_each(?) WHERE key NOT IN (SELECT key FROM json_each(?)) UNION ALL SELECT key, value, type FROM json_each(?))"
@@ -477,6 +600,78 @@ type PairRow struct { a string  b string  c string }
 // listCollections answers what exists, so a caller that read an empty result
 // can tell "wrong name" from "nothing written yet" -- collections are created
 // on first write, so a typo makes a new empty one rather than an error.
+// --- rollup (contract: "rollup") --------------------------------------------
+//
+// One bucket per distinct value of ONE field, largest first, ties by key.
+// `total` is documents matching the filter; `groups` is distinct values BEFORE
+// any limit, so truncation is visible rather than silent. A document with no
+// value for the field gets a null key, which the contract distinguishes from
+// an empty string. It composes with the filter, which applies before grouping.
+// It never returns documents.
+
+// `isnull` is a SQLite built-in, so aliasing a column to it is a syntax error —
+// and sqlite_query reports that as an empty result, not a failure.
+//
+// k is the key already rendered as JSON (json_quote), which solves three things
+// at once: the column is always TEXT so a numeric field still maps onto a
+// string field, an absent value arrives as the literal `null` the contract
+// asks for, and the value can be emitted straight into the response.
+type BucketRow struct { k string  c int }
+
+// rollupField accepts what the store can address: a plain field name. A path it
+// cannot address is rejected when declared rather than silently ignored, which
+// is why "a b" is a 400 and not an empty result.
+func rollupField(f) (ok) {
+  ok = validSegment(f)
+}
+
+func rollupJSON(db, ns, coll, filters, byField, byLimit) (out, status) {
+  out = ""
+  status = 0
+  if !rollupField(byField) { status = 400  return }
+  rules := normalizersOf(db, ns, coll)
+  where, whereBinds := whereClause(filters, rules)
+
+  binds := []string{ns, coll}
+  i := 0
+  while i < len(whereBinds) { binds = append(binds, whereBinds[i])  i = i + 1 }
+
+  path := "$." + byField
+  // json_extract returns SQL NULL for an absent field, and '' for an empty
+  // string — keep them apart so the null key survives into the JSON.
+  sel := "SELECT json_quote(json_extract(doc, '" + path + "')) AS k, " +
+         "COUNT(*) AS c FROM records WHERE ns=? AND coll=?" + where +
+         " GROUP BY json_extract(doc, '" + path + "') ORDER BY c DESC, k ASC"
+  rows := sqlite_query(db, sel, binds)
+  parsed := parse(rows, []BucketRow{})
+  groups := len(parsed)
+
+  totalRows := sqlite_query(db, "SELECT COUNT(*) AS c FROM records WHERE ns=? AND coll=?" + where, binds)
+  total := 0
+  tv, terr := json_get(totalRows, "[0].c")
+  if terr == "" { total = parse_int(tv) }
+
+  limit := byLimit
+  if limit <= 0 { limit = groups }
+  truncated := "false"
+  if groups > limit { truncated = "true" }
+
+  buckets := "["
+  j := 0
+  while j < len(parsed) {
+    if j >= limit { break }
+    if j > 0 { buckets = buckets + "," }
+    key := parsed[j].k
+    if key == "" { key = "null" }
+    buckets = buckets + "{\"key\":" + key + ",\"count\":" + str(parsed[j].c) + "}"
+    j = j + 1
+  }
+  buckets = buckets + "]"
+
+  out = "{\"ok\":true,\"buckets\":" + buckets + ",\"total\":" + str(total) +
+        ",\"groups\":" + str(groups) + ",\"truncated\":" + truncated + "}"
+}
+
 func listCollections(db, ns) (out) {
   out = "[]"
   rows := ""
