@@ -770,6 +770,20 @@ func handle(req) (res) {
   // Open by design: a liveness probe that needs a credential cannot tell you
   // that credentials are what is broken.
   if len(segs) == 1 {
+    // Both are public: the guide is documentation and contains no secrets, and
+    // an agent that knows only the host must be able to orient itself.
+    if segs[0] == "guide" {
+      res = jsonRes("200 OK", guideJSON())
+      return
+    }
+    if segs[0] == "llms.txt" {
+      res = response("200 OK", "text/plain; charset=utf-8", llmsTXT())
+      return
+    }
+    if segs[0] == "version" {
+      res = jsonRes("200 OK", "{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":" + jsonQuote(toolVersion()) + ",\"version\":\"1.0\"}")
+      return
+    }
     if segs[0] == "_health" {
       if sqlite_query(gDB, "SELECT 1 AS ok") == "[]" {
         res = jsonRes("503 Service Unavailable", "{\"ok\":false,\"service\":\"bkn\",\"reason\":\"datastore unreachable\"}")

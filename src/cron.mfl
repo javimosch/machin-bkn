@@ -216,7 +216,15 @@ func tickCron(db) (fired) {
 
 func schedulerLoop(db) {
   for {
-    sleep(1)
-    tickCron(db)
+    // sleep() counts MILLISECONDS. sleep(1) ran the whole tick a thousand
+    // times a second and pinned a core on a server with nothing to do.
+    sleep(1000)
+    // A goroutine's arena is reclaimed when the goroutine RETURNS, and this
+    // one never returns -- so without a scope every tick's allocations are
+    // retained for the life of the process. An idle server reached 6 GB in
+    // about an hour.
+    arena {
+      tickCron(db)
+    }
   }
 }

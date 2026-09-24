@@ -21,7 +21,14 @@
 // The lock covers only the counter. Formatting the id touches nothing shared,
 // so it happens after the token goes back.
 
-var ulidTok = make(chan int)
+// Two channels, not one. machin has only UNBUFFERED channels, so the lock has
+// to be a keeper goroutine handing a token round -- but a goroutine that sends
+// and then receives on the SAME channel satisfies its own send instead of
+// blocking, and the keeper free-runs at a full core (25M laps/second, measured).
+// Splitting acquire from release means the keeper's send can only be taken by
+// a minter, so an idle server parks at 0%.
+var ulidAcquire = make(chan int)
+var ulidRelease = make(chan int)
 var ulidLastMs = 0
 var ulidRandHi = 0
 var ulidRandLo = 0
@@ -32,12 +39,12 @@ func ulidHalf()    (n) { n = 1099511627776 }
 func ulidHalfHigh() (n) { n = 549755813888 }
 
 // ulidKeeper is the lock. It must be running before the first newID(), which
-// is why main() starts it before doing anything else; a `<-ulidTok` with no
-// keeper is a deadlock, and machin will say so.
+// is why main() starts it before doing anything else; a `<-ulidAcquire` with
+// no keeper is a deadlock, and machin will say so.
 func ulidKeeper() {
   while true {
-    ulidTok <- 1
-    _ = <-ulidTok
+    ulidAcquire <- 1   // parks until a minter takes the lock
+    _ = <-ulidRelease  // parks until that minter gives it back
   }
 }
 
@@ -90,7 +97,7 @@ func ulidByteOf(hi, lo, i) (out) {
 
 func newID() (out) {
   // --- critical section: advance the counter and take a snapshot ---
-  _ = <-ulidTok
+  _ = <-ulidAcquire
   ms := now_ms()
   if ms == ulidLastMs {
     ulidBumpRandom()
@@ -100,7 +107,7 @@ func newID() (out) {
   }
   hi := ulidRandHi
   lo := ulidRandLo
-  ulidTok <- 1
+  ulidRelease <- 1
   // --- everything below is local ---
 
   // 16 bytes: 6 of timestamp (big-endian) then 10 random

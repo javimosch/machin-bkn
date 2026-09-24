@@ -1,0 +1,216 @@
+// The guide convention — contract/spec-guide.md.
+//
+// The whole point of the convention is that the guide travels with the binary,
+// so this is an in-source constant assembled at runtime: there is no file to
+// ship alongside and nothing is fetched. `bkn guide` emits it, `GET /guide`
+// serves the same body, and `GET /llms.txt` is the breadcrumb that points a
+// fresh agent at both.
+
+func toolVersion() (s) { s = "0.1.0-mfl" }
+
+func guideJSON() (s) {
+  model := []string{}
+  model = append(model, "\"what it is\":\"A clean-room reimplementation of bkn in machin (MFL). It speaks the same HTTP and CLI contract over the same embedded SQLite, and exists to keep the original honest -- not to compete with it.\"")
+  model = append(model, "\"one binary\":\"Store, KV, auth, files, events, cron, hooks, locks and a sandboxed JS runtime are one static executable with no runtime dependencies. Copy it to a host and run it.\"")
+  model = append(model, "\"CLI first\":\"The CLI is the operator interface and the HTTP routes mirror it. There is no admin UI, on purpose: a CLI can be introspected and a UI cannot.\"")
+  model = append(model, "\"scripts are userland\":\"Anything domain-shaped -- forms, i18n, redirects, a CMS -- is a JS script you install, not a feature of the core. The core provides the primitives those scripts compose.\"")
+  model = append(model, "\"two planes\":\"The data plane (store/kv/files/events) is what applications call. The control plane (script, hooks, cron, auth admin) is operator work and is admin-gated by default.\"")
+
+  loop := []string{}
+  loop = append(loop, "\"Start a server: bkn serve --host 127.0.0.1 --port 7799 (BKN_DATA names the database, BKN_ADMIN_TOKEN gates every admin route).\"")
+  loop = append(loop, "\"Write documents into a namespaced collection: bkn store put myapp/users --data '{...}'.\"")
+  loop = append(loop, "\"Read them back over HTTP the same way an application would: curl $HOST/v1/store/myapp/users.\"")
+  loop = append(loop, "\"Declare who may read and write a collection by PUTting the collection itself: curl -X PUT $HOST/v1/store/myapp/users -d '{\\\"access\\\":{\\\"rules\\\":{\\\"read\\\":\\\"public\\\"}}}'. An undeclared verb is admin-only.\"")
+  loop = append(loop, "\"Install a script for anything domain-shaped: bkn script create forms --file forms.js.\"")
+  loop = append(loop, "\"Expose it publicly if it should be: bkn hooks create forms --script forms --rate-limit 10.\"")
+  loop = append(loop, "\"Run it on a schedule if it should be: bkn cron create nightly --schedule '0 3 * * *' --script forms.\"")
+
+  concepts := []string{}
+  concepts = append(concepts, "\"namespace/collection\":\"Every document lives at ns/coll. The namespace is the application, the collection is the kind of thing -- myapp/users. Collections are created by writing to them.\"")
+  concepts = append(concepts, "\"access policy\":\"Per collection, each verb (read, create, update, delete) names an audience: admin, user, owner, org or public. Declared by PUTting the collection with an access object; owner scoping also needs owner_field. An undeclared verb is admin-only, so nothing already deployed loosens by accident.\"")
+  concepts = append(concepts, "\"scope\":\"owner and org are not a check beside the query -- they are a filter folded INTO it. An owner-scoped read cannot see another owner's rows even by asking for them by id.\"")
+  concepts = append(concepts, "\"script\":\"A JS function main(input) run in a sandbox with a host object bkn.* (store, kv, auth, files, events, http, crypto, lock, log, now, id, caller). No filesystem, no eval, and outbound HTTP only to hosts you allow-listed.\"")
+  concepts = append(concepts, "\"run-access\":\"Who may run a script over HTTP: admin (the default, and what an undeclared script keeps), user, or public. A script you may not run is indistinguishable from one that does not exist.\"")
+  concepts = append(concepts, "\"caller\":\"bkn.caller tells a script who triggered it -- {kind: admin|user|anon, sub, org}. The policy says whether you may run it; the script decides what you see.\"")
+  concepts = append(concepts, "\"hook\":\"A public HTTP front door onto a script, with its own CORS allow-list, body cap and rate limit. The body reaches the script byte for byte, so provider signatures verify.\"")
+  concepts = append(concepts, "\"event\":\"An append-only log with a group, type and subject. Emitted by the core and by scripts; queryable and countable.\"")
+  concepts = append(concepts, "\"lock\":\"A named lease. The answer to multi-statement atomicity, because a transaction is caller-held state and a stateless HTTP API has nowhere to hold it.\"")
+
+  commands := []string{}
+  commands = append(commands, "\"data\":[\"bkn store put <ns/coll> [--id <id>] --data <json|@file|->\",\"bkn store get <ns/coll> <id>\",\"bkn store list <ns/coll> [--where <predicate>] [--order-by <field[:desc]>] [--limit <n>] [--offset <n>]\",\"bkn store find <ns/coll> --where <predicate>\",\"bkn store collections [--ns <namespace>]\",\"bkn kv get <key>\",\"bkn kv set <key> <value> [--type string|json|encrypted] [--public]\",\"bkn kv list [--prefix <p>]\"]")
+  commands = append(commands, "\"identity\":[\"bkn auth user create <email> --password-stdin [--name <n>]\",\"bkn auth user list\",\"bkn auth user show <email|id>\",\"bkn auth org create <slug> [--name <n>]\",\"bkn auth org list\",\"bkn auth org show <slug|id>\",\"bkn auth member add <org> <user> [--role owner|admin|member]\",\"bkn auth member list <org>\",\"bkn auth memberships <user>\",\"bkn auth can <user> <org> <min-role>\"]")
+  commands = append(commands, "\"files\":[\"bkn files ns create <name> [--allow-type <t>] [--public]\",\"bkn files ns list\",\"bkn files put <ns/name> --file <path>\",\"bkn files get <ns/name> [--out <path>]\",\"bkn files show <ns/name>\",\"bkn files list <ns>\"]")
+  commands = append(commands, "\"runtime\":[\"bkn script create <name> --file <path> [--run-access admin|user|public] [--allow-net <hosts>] [--timeout <ms>]\",\"bkn script update <name> --run-access admin|user|public\",\"bkn script run <name> [--input <json|@file|->]\",\"bkn script runs <name> [--limit <n>]\",\"bkn script list\",\"bkn hooks create <name> --script <s> [--allow-origin <o>] [--rate-limit <n>]\",\"bkn hooks list\",\"bkn cron create <name> --schedule <expr> --script <s>\",\"bkn cron list\",\"bkn cron tick\",\"bkn events emit <group> <type> [--subject <s>]\",\"bkn events list <group> [--since <t>] [--limit <n>]\",\"bkn events stats <group>\",\"bkn lock list\"]")
+  commands = append(commands, "\"operate\":[\"bkn serve [--host <h>] [--port <n>]\",\"bkn guide [--human]\",\"bkn help-json\",\"bkn version\"]")
+
+  examples := []string{}
+  examples = append(examples, "{\"goal\":\"Serve a public read-only collection an application can fetch without a token\",\"do\":[\"bkn store put blog/posts --id hello --data '{\\\"title\\\":\\\"Hello\\\"}'\",\"curl -s -X PUT -H \\\"Authorization: Bearer $ADMIN\\\" $HOST/v1/store/blog/posts -d '{\\\"access\\\":{\\\"rules\\\":{\\\"read\\\":\\\"public\\\"}}}'\",\"curl -s $HOST/v1/store/blog/posts\"]}")
+  examples = append(examples, "{\"goal\":\"Let signed-in users keep their own rows, and only their own\",\"do\":[\"curl -s -X PUT -H \\\"Authorization: Bearer $ADMIN\\\" $HOST/v1/store/notes/entries -d '{\\\"access\\\":{\\\"owner_field\\\":\\\"user_id\\\",\\\"rules\\\":{\\\"read\\\":\\\"owner\\\",\\\"create\\\":\\\"owner\\\",\\\"update\\\":\\\"owner\\\",\\\"delete\\\":\\\"owner\\\"}}}'\",\"curl -s -H \\\"Authorization: Bearer $USER_TOKEN\\\" $HOST/v1/store/notes/entries\"]}")
+  examples = append(examples, "{\"goal\":\"Take a webhook from a provider that signs the raw body\",\"do\":[\"bkn kv set stripe.webhook_secret whsec_... --type encrypted\",\"bkn script create stripe-webhook --file stripe-webhook.js\",\"bkn hooks create stripe --script stripe-webhook\"]}")
+  examples = append(examples, "{\"goal\":\"Expose a script to signed-in callers, then close it again without a restart\",\"do\":[\"bkn script create digest --file digest.js --run-access user\",\"curl -s -X POST -H \\\"Authorization: Bearer $USER_TOKEN\\\" $HOST/v1/script/digest/run -d '{}'\",\"bkn script update digest --run-access admin\"]}")
+
+  gotchas := []string{}
+  gotchas = append(gotchas, "\"This is a verification instrument, not a product. It exists to check that bkn's contract is implementable from the contract alone; run the original unless you are testing the contract.\"")
+  gotchas = append(gotchas, "\"An undeclared access policy is admin-only, and so is an undeclared script run-access. Nothing you installed before policies existed loosens when you upgrade.\"")
+  gotchas = append(gotchas, "\"A 401 means a credential would help; a 403 means it would not. A script or collection you may not reach is deliberately indistinguishable from one that does not exist, so 404s cannot enumerate what an operator installed.\"")
+  gotchas = append(gotchas, "\"BKN_ADMIN_TOKEN gates every admin route. Binding off-loopback without one leaves the control plane open; --host defaults to 127.0.0.1 for that reason.\"")
+  gotchas = append(gotchas, "\"A script's entry point is function main(input). ES module syntax (export default) is a syntax error in the sandbox.\"")
+  gotchas = append(gotchas, "\"A hook passes the request body to the script unmodified, because re-serializing before hashing breaks every provider signature.\"")
+  gotchas = append(gotchas, "\"Encrypted kv values need BKN_ENCRYPTION_KEY. Lose it and those values are unreadable -- there is no recovery path, by design.\"")
+  gotchas = append(gotchas, "\"There is no transaction. Use bkn lock for anything that must be atomic across statements.\"")
+
+  seeAlso := "[\"bkn help-json\",\"bkn version\",\"GET /llms.txt\",\"https://github.com/javimosch/bkn\"]"
+
+  s = "{\"ok\":true,\"version\":\"1.0\",\"guide\":{"
+  s = s + "\"bkn\":\"A single-binary backend core -- document store, KV, identity, file storage, an event log, scheduled jobs and sandboxed scripts over embedded SQLite -- reimplemented clean-room in machin (MFL).\","
+  s = s + "\"one_liner\":\"Copy one static binary to a host and you have a backend: namespaced collections with per-verb access policies, typed settings, users and orgs, files, events, cron and a JS runtime, all driven from the CLI and mirrored over HTTP.\","
+  s = s + "\"model\":{" + join(model, ",") + "},"
+  s = s + "\"loop\":[" + join(loop, ",") + "],"
+  s = s + "\"concepts\":{" + join(concepts, ",") + "},"
+  s = s + "\"commands\":{" + join(commands, ",") + "},"
+  s = s + "\"examples\":[" + join(examples, ",") + "],"
+  s = s + "\"gotchas\":[" + join(gotchas, ",") + "],"
+  s = s + "\"version\":" + jsonQuote(toolVersion()) + ","
+  s = s + "\"see_also\":" + seeAlso
+  s = s + "}}"
+}
+
+// The breadcrumb an agent that knows only the host fetches first. Short on
+// purpose: its whole job is to point at /guide.
+func llmsTXT() (s) {
+  s = "# bkn (machin-bkn) v" + toolVersion() + "\n\n"
+  s = s + "A single-binary backend core: namespaced document collections (store),\n"
+  s = s + "typed settings (kv), identity, files, events, cron and sandboxed JS\n"
+  s = s + "scripts over embedded SQLite. A clean-room reimplementation of bkn in\n"
+  s = s + "machin (MFL), speaking the same contract.\n\n"
+  s = s + "Full mental model:  GET /guide   (or run: bkn guide)\n"
+  s = s + "Command catalog:    bkn help-json\n\n"
+  s = s + "Quick start:\n"
+  s = s + "  curl -s $HOST/v1/store/myapp/users\n"
+  s = s + "  curl -s $HOST/v1/kv?public=1\n"
+  s = s + "  curl -s $HOST/_health\n\n"
+  s = s + "Reference implementation: https://github.com/javimosch/bkn\n"
+}
+
+// --human renders the same content as markdown. It walks the JSON it just
+// built rather than keeping a second copy in prose, so the two cannot drift.
+func guideMarkdown(db) (s) {
+  g := guideJSON()
+  body, _ := json_get(g, ".guide")
+  s = "# bkn (machin-bkn) " + toolVersion() + "\n\n"
+  s = s + jsonField(body, ".one_liner") + "\n\n"
+  s = s + mdSection(db, body, ".model", "## The model", true)
+  s = s + mdList(db, body, ".loop", "## The loop", true)
+  s = s + mdSection(db, body, ".concepts", "## Concepts", false)
+  s = s + mdCommands(db, body, ".commands")
+  s = s + mdExamples(db, body, ".examples")
+  s = s + mdList(db, body, ".gotchas", "## Gotchas", false)
+}
+
+// One object of string values, as a definition list (or a numbered one).
+func mdSection(db, body, path, heading, numbered) (s) {
+  s = heading + "\n\n"
+  obj, err := json_get(body, path)
+  if err != "" { return }
+  keys := objectKeys(db, obj)
+  i := 0
+  while i < len(keys) {
+    s = s + "- **" + keys[i] + "** — " + jsonField(obj, "." + keys[i]) + "\n"
+    i = i + 1
+  }
+  s = s + "\n"
+}
+
+func mdList(db, body, path, heading, numbered) (s) {
+  s = heading + "\n\n"
+  arr, err := json_get(body, path)
+  if err != "" { return }
+  items := arrayStrings(db, arr)
+  i := 0
+  while i < len(items) {
+    if numbered {
+      s = s + str(i+1) + ". " + items[i] + "\n"
+    } else {
+      s = s + "- " + items[i] + "\n"
+    }
+    i = i + 1
+  }
+  s = s + "\n"
+}
+
+func mdCommands(db, body, path) (s) {
+  s = "## Commands\n\n"
+  obj, err := json_get(body, path)
+  if err != "" { return }
+  groups := objectKeys(db, obj)
+  i := 0
+  while i < len(groups) {
+    s = s + "### " + groups[i] + "\n\n```\n"
+    arr, aErr := json_get(obj, "." + groups[i])
+    if aErr == "" {
+      items := arrayStrings(db, arr)
+      j := 0
+      while j < len(items) {
+        s = s + items[j] + "\n"
+        j = j + 1
+      }
+    }
+    s = s + "```\n\n"
+    i = i + 1
+  }
+}
+
+func mdExamples(db, body, path) (s) {
+  s = "## Examples\n\n"
+  arr, err := json_get(body, path)
+  if err != "" { return }
+  rows := sqlite_query(db, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{arr})
+  if rows == "[]" { return }
+  idx := parse(rows, []GroupRow{})
+  i := 0
+  while i < len(idx) {
+    ex, eErr := json_get(arr, "[" + idx[i].k + "]")
+    if eErr == "" {
+      s = s + "**" + jsonField(ex, ".goal") + "**\n\n```\n"
+      steps, sErr := json_get(ex, ".do")
+      if sErr == "" {
+        items := arrayStrings(db, steps)
+        j := 0
+        while j < len(items) {
+          s = s + items[j] + "\n"
+          j = j + 1
+        }
+      }
+      s = s + "```\n\n"
+    }
+    i = i + 1
+  }
+}
+
+// MFL cannot enumerate a JSON object's keys, so SQLite's json_each does it --
+// the same trick the store's filter reader uses.
+func objectKeys(db, obj) (out) {
+  out = []string{}
+  rows := sqlite_query(db, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{obj})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  i := 0
+  while i < len(parsed) {
+    out = append(out, parsed[i].k)
+    i = i + 1
+  }
+}
+
+func arrayStrings(db, arr) (out) {
+  out = []string{}
+  // json_each's `value` column is the SQL value, so a JSON string element
+  // arrives already unquoted.
+  rows := sqlite_query(db, "SELECT value AS k, 0 AS n FROM json_each(?)", []string{arr})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  i := 0
+  while i < len(parsed) {
+    out = append(out, parsed[i].k)
+    i = i + 1
+  }
+}

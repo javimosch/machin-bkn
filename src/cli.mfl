@@ -312,8 +312,20 @@ func runCLI(a) (code) {
   // read commands exist because "the CLI is the API" is the model this tool
   // claims -- a verb available over HTTP should be a subcommand too.
 
+  if a[1] == "guide" {
+    // Embedded, never fetched: the guide travels with the binary, which is the
+    // whole point of the convention.
+    human := false
+    gi := 2
+    while gi < len(a) {
+      if a[gi] == "--human" { human = true }
+      gi = gi + 1
+    }
+    if human { println(guideMarkdown(db)) } else { println(guideJSON()) }
+    return
+  }
   if a[1] == "version" {
-    println("{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":\"0.1.0-mfl\",\"version\":\"1.0\"}")
+    println("{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":" + jsonQuote(toolVersion()) + ",\"version\":\"1.0\"}")
     return
   }
 
@@ -644,6 +656,7 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"script run\":{\"args\":[\"name\"],\"flags\":[\"--input <json|@file|->\"]}")
   cmds = append(cmds, "\"script runs\":{\"args\":[\"name\"],\"flags\":[\"--limit <n>\"]}")
   cmds = append(cmds, "\"script list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"script update\":{\"args\":[\"name\"],\"flags\":[\"--run-access <admin|user|public>\"]}")
   cmds = append(cmds, "\"hooks create\":{\"args\":[\"name\"],\"flags\":[\"--script <s>\",\"--allow-origin <o>\",\"--rate-limit <n>\"]}")
   cmds = append(cmds, "\"hooks list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"cron create\":{\"args\":[\"name\"],\"flags\":[\"--schedule <expr>\",\"--script <s>\"]}")
@@ -651,6 +664,7 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"cron tick\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"lock list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"serve\":{\"args\":[],\"flags\":[\"--host <h>\",\"--port <n>\"]}")
+  cmds = append(cmds, "\"guide\":{\"args\":[],\"flags\":[\"--human\"]}")
   cmds = append(cmds, "\"version\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"help-json\":{\"args\":[],\"flags\":[]}")
   s = "{\"ok\":true,\"version\":\"1.0\",\"exit_codes\":{\"0\":\"ok\",\"80\":\"unknown command\",\"81\":\"not found\",\"85\":\"validation error\",\"110\":\"datastore unavailable\"},\"commands\":{" + join(cmds, ",") + "}}"
