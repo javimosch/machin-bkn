@@ -150,12 +150,77 @@ func authRoutes(req, q, segs) (res) {
     res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
     return
   }
+  // Self-service: a signed-in user changes their OWN password by proving the
+  // current one. An anonymous caller gets 401 rather than 403 — a credential
+  // would genuinely help here.
+  if leaf == "password" {
+    if req.method != "POST" { res = errRes("405 Method Not Allowed", "method_not_allowed", "use POST")  return }
+    tok := bearer(req)
+    if tok == "" { res = errRes("401 Unauthorized", "not_authenticated", "missing bearer access token")  return }
+    // meFromToken hands back the user as JSON, so resolve the row to reach the
+    // stored hash — the current password has to be proved, not just claimed.
+    whoJSON, _, merr := meFromToken(gDB, tok)
+    if merr != "" { res = errRes("401 Unauthorized", "not_authenticated", merr)  return }
+    who, whoFound := findUser(gDB, jsonField(whoJSON, ".id"))
+    if !whoFound { res = errRes("401 Unauthorized", "not_authenticated", "user not found")  return }
+    cur := jsonField(req.body, ".current_password")
+    nxt := jsonField(req.body, ".new_password")
+    if nxt == "" { res = errRes("400 Bad Request", "validation_error", "new_password is required")  return }
+    if !verifyPassword(cur, who.password_hash) {
+      res = errRes("401 Unauthorized", "bad_credentials", "email or password is incorrect")
+      return
+    }
+    _, uerr := updateUser(gDB, who.id, "", "", nxt, false, false)
+    if uerr != "" { res = errRes("400 Bad Request", "validation_error", uerr)  return }
+    res = jsonRes("200 OK", "{\"ok\":true,\"changed\":true}")
+    return
+  }
   if leaf == "users" {
+    if req.method == "POST" && len(segs) == 3 {
+      created, err := createUser(gDB, jsonField(req.body, ".email"), jsonField(req.body, ".password"), jsonField(req.body, ".name"), jsonField(req.body, ".role"))
+      if err != "" {
+        st, kind := authStatus(err)
+        res = errRes(st, kind, err)
+        return
+      }
+      res = jsonRes("201 Created", "{\"ok\":true,\"user\":" + created + "}")
+      return
+    }
     users, count := listUsers(gDB, qInt(q, "limit", 50), qInt(q, "offset", 0))
     res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"users\":" + users + "}")
     return
   }
   if leaf == "orgs" {
+    // /v1/auth/orgs/<slug>/members — membership is addressed under its org
+    // rather than as a top-level resource, because it has no meaning without one.
+    if len(segs) >= 5 {
+      if segs[4] == "members" {
+        if req.method == "POST" {
+          merr := addMember(gDB, segs[3], jsonField(req.body, ".user"), jsonField(req.body, ".role"))
+          if merr != "" {
+            st, kind := authStatus(merr)
+            res = errRes(st, kind, merr)
+            return
+          }
+          res = jsonRes("201 Created", "{\"ok\":true,\"added\":true}")
+          return
+        }
+        members, lerr := listMembers(gDB, segs[3])
+        if lerr != "" { res = errRes("404 Not Found", "not_found", lerr)  return }
+        res = jsonRes("200 OK", "{\"ok\":true,\"members\":" + members + "}")
+        return
+      }
+    }
+    if req.method == "POST" && len(segs) == 3 {
+      org, oerr := createOrg(gDB, jsonField(req.body, ".slug"), jsonField(req.body, ".name"))
+      if oerr != "" {
+        st, kind := authStatus(oerr)
+        res = errRes(st, kind, oerr)
+        return
+      }
+      res = jsonRes("201 Created", "{\"ok\":true,\"org\":" + org + "}")
+      return
+    }
     orgs := listOrgs(gDB)
     res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, orgs)) + ",\"orgs\":" + orgs + "}")
     return
