@@ -11,7 +11,7 @@
 // at the first NUL, which a PNG has at byte 8.
 
 func filesSchema() (s) {
-  s = "CREATE TABLE IF NOT EXISTS file_ns (name TEXT PRIMARY KEY, backend TEXT NOT NULL DEFAULT 'local', max_bytes INTEGER NOT NULL DEFAULT 0, allow_types TEXT NOT NULL DEFAULT '', public INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS files (ns TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, ctype TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, name)); CREATE INDEX IF NOT EXISTS files_sha ON files(sha256);"
+  s = "CREATE TABLE IF NOT EXISTS file_ns (name TEXT PRIMARY KEY, backend TEXT NOT NULL DEFAULT 'local', max_bytes INTEGER NOT NULL DEFAULT 0, allow_types TEXT NOT NULL DEFAULT '', public INTEGER NOT NULL DEFAULT 0, signing_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS files (ns TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, ctype TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, name)); CREATE INDEX IF NOT EXISTS files_sha ON files(sha256);"
 }
 
 func blobDir() (d) {
@@ -36,12 +36,24 @@ func hexOf(b) (out) {
 
 // --- namespaces -----------------------------------------------------------
 
-type NsRow struct { name string  backend string  max_bytes int  allow_types string  public int  created_at string }
+type NsRow struct { name string  backend string  max_bytes int  allow_types string  public int  signing_key string  created_at string }
+
+// A store made before signed links existed gains the column on open.
+func filesMigrate(db) {
+  sqlite_exec(db, "ALTER TABLE file_ns ADD COLUMN signing_key TEXT NOT NULL DEFAULT ''", []string{})
+}
+
+// The key is never echoed: it is the thing that makes every link forgeable,
+// and an operator who needs it set it.
+func nsHasSigningKey(n) (s) {
+  s = "false"
+  if n.signing_key != "" { s = "true" }
+}
 
 func nsJSON(n) (s) {
   s = "{\"name\":" + jsonQuote(n.name) + ",\"backend\":" + jsonQuote(n.backend) + ",\"max_bytes\":" + str(n.max_bytes) + ",\"allow_types\":" + typeListJSON(n.allow_types) + ",\"public\":"
   if n.public == 1 { s = s + "true" } else { s = s + "false" }
-  s = s + ",\"created_at\":" + jsonQuote(n.created_at) + "}"
+  s = s + ",\"signed_urls\":" + nsHasSigningKey(n) + ",\"created_at\":" + jsonQuote(n.created_at) + "}"
 }
 
 func typeListJSON(csv) (s) {
@@ -54,7 +66,7 @@ func typeListJSON(csv) (s) {
   s = "[" + join(parts, ",") + "]"
 }
 
-func createNs(db, name, backend, maxBytes, allowTypes, public) (out, err) {
+func createNs(db, name, backend, maxBytes, allowTypes, public, signingKey) (out, err) {
   out = ""
   err = ""
   if !validSegment(name) { err = "namespace must be lowercase and start with a letter"  return }
@@ -62,16 +74,16 @@ func createNs(db, name, backend, maxBytes, allowTypes, public) (out, err) {
   if backend != "local" { err = "backend must be one of: local, s3"  return }
   pub := "0"
   if public { pub = "1" }
-  sqlite_exec(db, "INSERT INTO file_ns (name, backend, max_bytes, allow_types, public, created_at) VALUES (?,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),?) ON CONFLICT(name) DO UPDATE SET backend = excluded.backend, max_bytes = excluded.max_bytes, allow_types = excluded.allow_types, public = excluded.public", []string{name, backend, str(maxBytes), allowTypes, pub, nowStamp()})
+  sqlite_exec(db, "INSERT INTO file_ns (name, backend, max_bytes, allow_types, public, signing_key, created_at) VALUES (?,?,CAST(? AS INTEGER),?,CAST(? AS INTEGER),?,?) ON CONFLICT(name) DO UPDATE SET backend = excluded.backend, max_bytes = excluded.max_bytes, allow_types = excluded.allow_types, public = excluded.public, signing_key = excluded.signing_key", []string{name, backend, str(maxBytes), allowTypes, pub, signingKey, nowStamp()})
   n, stored := findNs(db, name)
   if !stored { err = "the namespace was not stored (the database may be locked by another process)"  return }
   out = nsJSON(n)
 }
 
 func findNs(db, name) (n, found) {
-  n = NsRow{name: "", backend: "", max_bytes: 0, allow_types: "", public: 0, created_at: ""}
+  n = NsRow{name: "", backend: "local", max_bytes: 0, allow_types: "", public: 0, signing_key: "", created_at: ""}
   found = false
-  rows := sqlite_query(db, "SELECT name, backend, max_bytes, allow_types, public, created_at FROM file_ns WHERE name = ?", []string{name})
+  rows := sqlite_query(db, "SELECT name, backend, max_bytes, allow_types, public, signing_key, created_at FROM file_ns WHERE name = ?", []string{name})
   if rows == "[]" { return }
   parsed := parse(rows, []NsRow{})
   if len(parsed) == 0 { return }
@@ -81,7 +93,7 @@ func findNs(db, name) (n, found) {
 
 func listNs(db) (out) {
   out = "[]"
-  rows := sqlite_query(db, "SELECT name, backend, max_bytes, allow_types, public, created_at FROM file_ns ORDER BY name")
+  rows := sqlite_query(db, "SELECT name, backend, max_bytes, allow_types, public, signing_key, created_at FROM file_ns ORDER BY name")
   if rows == "[]" { return }
   parsed := parse(rows, []NsRow{})
   parts := []string{}
@@ -290,4 +302,61 @@ func listFilesSandbox(db, ns, limit, offset) (out) {
     i = i + 1
   }
   out = "[" + join(parts, ",") + "]"
+}
+
+
+// --- signed links ----------------------------------------------------------
+//
+// A private namespace answers 404 to anyone without a valid signature, so a
+// link is the whole credential: it carries what it is for and when it dies,
+// and nothing else has to be handed out.
+
+// The signature covers the path AND the expiry together, so neither can be
+// edited without breaking it.
+func signPayload(key, path, exp) (sig) {
+  sig = b64url(from_hex(hmac_sha256(key, path + "\n" + str(exp))))
+}
+
+func signedPath(ns, name, sig, exp) (out) {
+  out = "/v1/files/" + ns + "/" + name + "?sig=" + sig + "&exp=" + str(exp)
+}
+
+func signFile(db, ns, name, ttl) (out, err) {
+  out = ""
+  err = ""
+  n, found := findNs(db, ns)
+  if !found { err = "namespace not found"  return }
+  if n.signing_key == "" { err = "namespace has no signing key; create one with --signing-key"  return }
+  _, fileFound := findFile(db, ns, name)
+  if !fileFound { err = "file not found"  return }
+  if ttl <= 0 { ttl = 86400 }
+  exp := now() + ttl
+  out = signedPath(ns, name, signPayload(n.signing_key, "/v1/files/" + ns + "/" + name, exp), exp)
+}
+
+// Constant-time compare, and the expiry checked before anything else: an
+// expired link must not even reveal whether the signature was right.
+func signatureValid(db, ns, name, sig, exp) (ok) {
+  ok = false
+  if sig == "" { return }
+  if exp == "" { return }
+  if !looksNumeric(exp) { return }
+  if parse_int(exp) < now() { return }
+  n, found := findNs(db, ns)
+  if !found { return }
+  if n.signing_key == "" { return }
+  want := signPayload(n.signing_key, "/v1/files/" + ns + "/" + name, parse_int(exp))
+  ok = constantTimeEqual(want, sig)
+}
+
+func constantTimeEqual(a, b) (same) {
+  same = false
+  if len(a) != len(b) { return }
+  diff := 0
+  i := 0
+  while i < len(a) {
+    if substr(a, i, i+1) != substr(b, i, i+1) { diff = diff + 1 }
+    i = i + 1
+  }
+  same = diff == 0
 }

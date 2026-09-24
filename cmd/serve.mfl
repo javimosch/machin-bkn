@@ -681,7 +681,14 @@ func filesRoutes(req, q, segs) (res) {
   }
 
   if n.public != 1 {
-    if !isAdmin { res = errRes("404 Not Found", "not_found", "no such file")  return }
+    // A signed link is a credential in itself: it names one file and carries
+    // its own expiry, so it opens a private namespace without a token. It is
+    // checked before the admin fallback so an expired link fails as a 404
+    // rather than leaking that the file exists.
+    signed := signatureValid(gDB, ns, name, qGet(q, "sig"), qGet(q, "exp"))
+    if !signed {
+      if !isAdmin { res = errRes("404 Not Found", "not_found", "no such file")  return }
+    }
   }
   f, found := findFile(gDB, ns, name)
   if !found { res = errRes("404 Not Found", "not_found", "no such file")  return }
@@ -898,6 +905,7 @@ func main() {
   // A store written before policies existed gains the column on open.
   accessMigrate(gDB)
   scriptMigrate(gDB)
+  filesMigrate(gDB)
   if gDB == 0 { println("cannot open " + path)  return }
   // The scheduler is part of the server, not a separate process: a job that
   // only fires when someone remembers to run a ticker is not a schedule.

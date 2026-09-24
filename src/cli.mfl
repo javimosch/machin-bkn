@@ -11,6 +11,7 @@ func runCLI(a) (code) {
   // database would fail on a column the server would have added.
   accessMigrate(db)
   scriptMigrate(db)
+  filesMigrate(db)
   if db == 0 { println("cannot open " + path)  code = 110  return }
 
   if a[1] == "auth" {
@@ -69,16 +70,25 @@ func runCLI(a) (code) {
         maxBytes := 0
         allow := []string{}
         public := false
+        signingKey := ""
         i := 5
         while i < len(a) {
           if a[i] == "--public" { public = true }
+          // `auto` mints one: an operator who wants signed links should not
+          // have to invent key material to get them.
+          if a[i] == "--signing-key" {
+            if i+1 < len(a) {
+              signingKey = a[i+1]
+              if signingKey == "auto" { signingKey = to_hex(rand_bytes(32)) }
+            }
+          }
           if a[i] == "--backend" { if i+1 < len(a) { backend = a[i+1] } }
           if a[i] == "--max-bytes" { if i+1 < len(a) { maxBytes = parse_int(a[i+1]) } }
           // repeatable: each --allow-type adds one type to the namespace
           if a[i] == "--allow-type" { if i+1 < len(a) { allow = append(allow, a[i+1]) } }
           i = i + 1
         }
-        out, err := createNs(db, a[4], backend, maxBytes, join(allow, ","), public)
+        out, err := createNs(db, a[4], backend, maxBytes, join(allow, ","), public, signingKey)
         if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
         println("{\"ok\":true,\"namespace\":" + out + "}")
         return
@@ -244,6 +254,37 @@ func runCLI(a) (code) {
       println("{\"ok\":true,\"deleted\":true}")
       return
     }
+  }
+
+  if a[1] == "backup" {
+    to := ""
+    toStdout := false
+    i := 2
+    while i < len(a) {
+      if a[i] == "--to" { if i+1 < len(a) { to = a[i+1] } }
+      if a[i] == "--stdout" { toStdout = true }
+      i = i + 1
+    }
+    if to == "" && !toStdout {
+      println(cliErr("say where the snapshot goes"))
+      code = 85
+      return
+    }
+    if toStdout {
+      // Snapshot to a temp file first: VACUUM INTO needs a real path, and a
+      // half-written stream is worse than a refusal.
+      tmp := "/tmp/bkn-backup-" + str(now_ms()) + ".db"
+      _, bErr := backupTo(db, tmp)
+      if bErr != "" { println(cliErr(bErr))  code = 85  return }
+      // NUL-safe, and it survives both a redirect and a pipe.
+      write_file_bytes("/dev/stdout", read_file_bytes(tmp))
+      remove(tmp)
+      return
+    }
+    out, bErr := backupTo(db, to)
+    if bErr != "" { println(cliErr(bErr))  code = 85  return }
+    println(out)
+    return
   }
 
   if a[1] == "lock" {
@@ -706,6 +747,80 @@ func runCLI(a) (code) {
       println("{\"ok\":true,\"deleted\":true}")
       return
     }
+    if a[2] == "count" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      filters := []Filter{}
+      by := ""
+      byLimit := 0
+      i := 4
+      while i < len(a) {
+        if a[i] == "--where" { if i+1 < len(a) { filters = appendWhere(db, ns, coll, filters, a[i+1]) } }
+        if a[i] == "--by" { if i+1 < len(a) { by = a[i+1] } }
+        if a[i] == "--limit" { if i+1 < len(a) { byLimit = parse_int(a[i+1]) } }
+        i = i + 1
+      }
+      if by != "" {
+        // One bucket per distinct value, largest first, with `groups` and
+        // `truncated` alongside so a --limit cannot hide that there was more.
+        fields, rStatus := rollupParts(db, ns, coll, filters, by, byLimit)
+        if rStatus != 0 { println(cliErr("cannot group by " + by))  code = 85  return }
+        println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"by\":" + jsonQuote(by) + "," + fields + "}")
+        return
+      }
+      println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"total\":" + str(countDocs(db, ns, coll, filters)) + "}")
+      return
+    }
+    if a[2] == "access" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      rules := []string{}
+      ownerField := ""
+      orgField := ""
+      clear := false
+      touched := false
+      i := 4
+      while i < len(a) {
+        if a[i] == "--access" {
+          if i+1 < len(a) {
+            pair := a[i+1]
+            eq := index(pair, "=")
+            if eq > 0 {
+              rules = append(rules, jsonQuote(substr(pair, 0, eq)) + ":" + jsonQuote(substr(pair, eq+1, len(pair))))
+              touched = true
+            }
+          }
+        }
+        if a[i] == "--owner-field" { if i+1 < len(a) { ownerField = a[i+1]  touched = true } }
+        if a[i] == "--org-field" { if i+1 < len(a) { orgField = a[i+1]  touched = true } }
+        if a[i] == "--clear" { clear = true  touched = true }
+        i = i + 1
+      }
+      if clear {
+        // Back to undeclared, which is admin-only -- the safe direction.
+        setAccess(db, ns, coll, "")
+        println("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(a[3]) + ",\"normalize\":" + normalizersOf(db, ns, coll) + "}}")
+        return
+      }
+      if !touched {
+        // No flags is a read, not a no-op.
+        acc := accessOf(db, ns, coll)
+        if acc == "" { acc = "{}" }
+        println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"access\":" + acc + ",\"rules\":" + jsonQuote(ruleSummary(acc)) + "}")
+        return
+      }
+      parts := []string{}
+      if ownerField != "" { parts = append(parts, "\"owner_field\":" + jsonQuote(ownerField)) }
+      if orgField != "" { parts = append(parts, "\"org_field\":" + jsonQuote(orgField)) }
+      parts = append(parts, "\"rules\":{" + join(rules, ",") + "}")
+      acc := "{" + join(parts, ",") + "}"
+      vErr := validateAccess(db, acc)
+      if vErr != "" { println(cliErr(vErr))  code = 85  return }
+      ensureCollection(db, ns, coll)
+      setAccess(db, ns, coll, acc)
+      println("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(a[3]) + ",\"normalize\":" + normalizersOf(db, ns, coll) + ",\"access\":" + accessOf(db, ns, coll) + "}}")
+      return
+    }
     if a[2] == "patch" {
       ns, coll, refErr := splitRef(a[3])
       if refErr != "" { println(cliErr(refErr))  code = 85  return }
@@ -765,6 +880,20 @@ func runCLI(a) (code) {
   }
 
   if a[1] == "files" {
+    if a[2] == "sign" {
+      ttl := 86400
+      baseURL := ""
+      i := 5
+      while i < len(a) {
+        if a[i] == "--ttl" { if i+1 < len(a) { ttl = parseAge(a[i+1]) } }
+        if a[i] == "--base-url" { if i+1 < len(a) { baseURL = a[i+1] } }
+        i = i + 1
+      }
+      path, sErr := signFile(db, a[3], a[4], ttl)
+      if sErr != "" { println(cliErr(sErr))  code = 81  return }
+      println("{\"ok\":true,\"url\":" + jsonQuote(baseURL + path) + ",\"expires_in\":" + jsonQuote(str(ttl) + "s") + "}")
+      return
+    }
     if a[2] == "delete" {
       dErr := deleteFile(db, a[3], a[4])
       if dErr != "" { println(cliErr(dErr))  code = 81  return }
@@ -971,6 +1100,23 @@ func dataArg(v) (out) {
   if has_prefix(v, "@") { out = read_file(substr(v, 1, len(v))) }
 }
 
+// The `rules` string beside the access object: what an operator would say out
+// loud, in declaration order rather than the map's.
+func ruleSummary(acc) (out) {
+  out = ""
+  rules, err := json_get(acc, ".rules")
+  if err != "" { return }
+  parts := []string{}
+  verbs := []string{"read", "create", "update", "delete"}
+  i := 0
+  while i < len(verbs) {
+    v := jsonField(rules, "." + verbs[i])
+    if v != "" { parts = append(parts, verbs[i] + "=" + v) }
+    i = i + 1
+  }
+  out = join(parts, ",")
+}
+
 func cliErr(msg) (s) { s = "{\"ok\":false,\"error\":{\"message\":" + jsonQuote(msg) + "}}" }
 
 func baseName(p) (n) {
@@ -1034,6 +1180,8 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"store create\":{\"args\":[\"ns/coll\"],\"flags\":[\"--normalize <field=rule>\"]}")
   cmds = append(cmds, "\"store patch\":{\"args\":[\"ns/coll\",\"id\"],\"flags\":[\"--data <json|@file|->\"]}")
   cmds = append(cmds, "\"store delete\":{\"args\":[\"ns/coll\",\"id\"],\"flags\":[]}")
+  cmds = append(cmds, "\"store count\":{\"args\":[\"ns/coll\"],\"flags\":[\"--where <predicate>\",\"--by <field>\",\"--limit <n>\"]}")
+  cmds = append(cmds, "\"store access\":{\"args\":[\"ns/coll\"],\"flags\":[\"--access <verb=audience>\",\"--owner-field <field>\",\"--org-field <field>\",\"--clear\"]}")
   cmds = append(cmds, "\"store collections\":{\"args\":[],\"flags\":[\"--ns <namespace>\"]}")
   cmds = append(cmds, "\"kv get\":{\"args\":[\"key\"],\"flags\":[]}")
   cmds = append(cmds, "\"kv set\":{\"args\":[\"key\",\"value\"],\"flags\":[\"--type <string|json|encrypted>\",\"--public\"]}")
@@ -1061,12 +1209,13 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"auth member list\":{\"args\":[\"org\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth memberships\":{\"args\":[\"user\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth can\":{\"args\":[\"user\",\"org\",\"min-role\"],\"flags\":[]}")
-  cmds = append(cmds, "\"files ns create\":{\"args\":[\"name\"],\"flags\":[\"--allow-type <t>\",\"--public\"]}")
+  cmds = append(cmds, "\"files ns create\":{\"args\":[\"name\"],\"flags\":[\"--backend <local|s3>\",\"--max-bytes <n>\",\"--allow-type <t>\",\"--public\",\"--signing-key <key|auto>\"]}")
   cmds = append(cmds, "\"files ns list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"files ns delete\":{\"args\":[\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"files put\":{\"args\":[\"ns\",\"path\"],\"flags\":[\"--name <n>\",\"--content-type <t>\"]}")
   cmds = append(cmds, "\"files get\":{\"args\":[\"ns\",\"name\"],\"flags\":[\"--out <path>\"]}")
   cmds = append(cmds, "\"files show\":{\"args\":[\"ns\",\"name\"],\"flags\":[]}")
+  cmds = append(cmds, "\"files sign\":{\"args\":[\"namespace\",\"name\"],\"flags\":[\"--ttl <duration>\",\"--base-url <url>\"]}")
   cmds = append(cmds, "\"files delete\":{\"args\":[\"namespace\",\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"files list\":{\"args\":[\"ns\"],\"flags\":[]}")
   cmds = append(cmds, "\"events emit\":{\"args\":[\"stream\",\"type\"],\"flags\":[\"--level <l>\",\"--subject <s>\",\"--data <json>\"]}")
@@ -1098,6 +1247,7 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"lock acquire\":{\"args\":[\"key\"],\"flags\":[\"--ttl <duration>\"]}")
   cmds = append(cmds, "\"lock release\":{\"args\":[\"key\",\"owner\"],\"flags\":[\"--force\"]}")
   cmds = append(cmds, "\"lock list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"backup\":{\"args\":[],\"flags\":[\"--to <path>\",\"--stdout\"]}")
   cmds = append(cmds, "\"serve\":{\"args\":[],\"flags\":[\"--host <h>\",\"--port <n>\"]}")
   cmds = append(cmds, "\"guide\":{\"args\":[],\"flags\":[\"--human\"]}")
   cmds = append(cmds, "\"version\":{\"args\":[],\"flags\":[]}")

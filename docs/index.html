@@ -80,8 +80,8 @@ table{display:block;overflow-x:auto}}
 
 <div class="score">
   <div><b>191</b><span>contract assertions from bkn's own <code>test/</code>, all passing</span></div>
-  <div><b>239</b><span>further assertions covering the CLI, which the contract suite never touches</span></div>
-  <div><b>75/87</b><span>commands; 8 are out of scope by design, 4 are contract that moved since</span></div>
+  <div><b>279</b><span>further assertions covering the CLI, which the contract suite never touches</span></div>
+  <div><b>79/87</b><span>commands; the 8 missing are deliberately out of scope</span></div>
   <div><b>7.6&nbsp;MB</b><span>one static binary, ~6,200 lines of MFL</span></div>
 </div>
 
@@ -163,7 +163,9 @@ cannot see about itself.</p>
   <em>snapshot</em> had gone quietly out of date, and a score measured against
   it read better than the truth. A second implementation is the thing that
   notices, provided its copy of the contract is refreshed rather than trusted.
-  Those four are open.
+  All four are now implemented, and <code>files sign</code> brought signed
+  links with it: a URL that is its own credential, so a private namespace can
+  be opened without handing out a token.
 </div>
 
 <h2>Build and run</h2>

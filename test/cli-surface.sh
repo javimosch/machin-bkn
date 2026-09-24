@@ -126,5 +126,74 @@ export BKN_ENCRYPTION_KEYS="v1:$OLD,v2:$NEW,v9:$NEW"
 chk "the unopenable value survived" "$("$M" kv get app.secret </dev/null | j 'd["entry"]["value"]')" "sk_live_ORIGINAL"
 chk "and the rekeyed one too"     "$("$M" kv get app.second </dev/null | j 'd["entry"]["value"]')" "second-val"
 
+# --- store count ------------------------------------------------------------
+"$M" store put shop/items --id c1 --data '{"kind":"a"}' >/dev/null 2>&1
+"$M" store put shop/items --id c2 --data '{"kind":"a"}' >/dev/null 2>&1
+"$M" store put shop/items --id c3 --data '{"kind":"b"}' >/dev/null 2>&1
+chk "count answers how many"      "$("$M" store count shop/items </dev/null | j 'str(d["total"])')" "3"
+chk "count honours --where"       "$("$M" store count shop/items --where kind=a </dev/null | j 'str(d["total"])')" "2"
+chk "count --by buckets, largest first" "$("$M" store count shop/items --by kind </dev/null | j '",".join(b["key"]+"="+str(b["count"]) for b in d["buckets"])')" "a=2,b=1"
+# groups and truncated exist so a --limit cannot hide that there was more
+chk "count --limit shows truncation" "$("$M" store count shop/items --by kind --limit 1 </dev/null | j 'str(len(d["buckets"]))+"/"+str(d["groups"])+"/"+str(d["truncated"])')" "1/2/True"
+chk "count rejects a bad --by"    "$(rc "$M" store count shop/items --by 'no such')" "85"
+
+# --- store access -----------------------------------------------------------
+chk "access sets rules"           "$("$M" store access shop/items --access read=owner --access create=user --owner-field uid </dev/null | j 'd["collection"]["access"]["rules"]["read"]+"/"+d["collection"]["access"]["owner_field"]')" "owner/uid"
+chk "no flags reads it back"      "$("$M" store access shop/items </dev/null | j 'd["rules"]')" "read=owner,create=user"
+chk "--clear makes it undeclared" "$("$M" store access shop/items --clear </dev/null | j 'str("access" in d["collection"])')" "False"
+chk "and the read-back is empty"  "$("$M" store access shop/items </dev/null | j 'd["rules"]')" ""
+chk "access rejects a bad audience" "$(rc "$M" store access shop/items --access read=nonsense)" "85"
+
+# --- files sign -------------------------------------------------------------
+"$M" files ns create signed --signing-key auto >/dev/null 2>&1
+"$M" files ns create unsigned >/dev/null 2>&1
+printf 'secret bytes' > "$WORK/s.txt"
+"$M" files put signed "$WORK/s.txt" --name s.txt >/dev/null 2>&1
+"$M" files put unsigned "$WORK/s.txt" --name u.txt >/dev/null 2>&1
+chk "ns reports signed_urls"      "$("$M" files ns list </dev/null | j 'str(next(n["signed_urls"] for n in d["namespaces"] if n["name"]=="signed"))')" "True"
+# the key itself must never be echoed: it makes every link forgeable
+chk "the signing key is not echoed" "$("$M" files ns list </dev/null | grep -c signing_key)" "0"
+chk "sign returns a url"          "$("$M" files sign signed s.txt --ttl 10m </dev/null | j '"sig=" in d["url"] and "exp=" in d["url"]')" "True"
+chk "--base-url prefixes it"      "$("$M" files sign signed s.txt --base-url https://cdn.example.com </dev/null | j 'd["url"].startswith("https://cdn.example.com/v1/files/")')" "True"
+chk "a ns with no key refuses"    "$(rc "$M" files sign unsigned u.txt)" "81"
+chk "signing a missing file"      "$(rc "$M" files sign signed nope.txt)" "81"
+
+PORT=$((21000 + RANDOM % 9000))
+"$M" serve --host 127.0.0.1 --port $PORT >"$WORK/srv.log" 2>&1 &
+SRV=$!
+for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$PORT/_health" >/dev/null && break; sleep 0.1; done
+B="http://127.0.0.1:$PORT"
+U=$("$M" files sign signed s.txt --ttl 10m </dev/null | j 'd["url"]')
+code() { curl -s -o /dev/null -w '%{http_code}' "$1"; }
+chk "private ns is 404 unsigned"  "$(code "$B/v1/files/signed/s.txt")" "404"
+chk "a signed link opens it"      "$(code "$B$U")" "200"
+chk "and serves the bytes"        "$(curl -s "$B$U")" "secret bytes"
+chk "a tampered sig is 404"       "$(code "$B$(echo "$U" | sed 's/sig=./sig=X/')")" "404"
+# Editing exp in the URL only proves the signature covers it. To test the
+# EXPIRY, sign a correctly-signed link with a 1s life and let it die.
+chk "editing exp breaks the sig"  "$(code "$B$(echo "$U" | sed -E 's/exp=[0-9]+/exp=1000000000/')")" "404"
+SHORT=$("$M" files sign signed s.txt --ttl 1s </dev/null | j 'd["url"]')
+chk "a fresh short link opens"    "$(code "$B$SHORT")" "200"
+sleep 2
+chk "and is 404 once it expires"  "$(code "$B$SHORT")" "404"
+SIG=$(echo "$U" | grep -oE 'sig=[^&]+')
+chk "a sig does not open another file" "$(code "$B/v1/files/unsigned/u.txt?$SIG&exp=9999999999")" "404"
+kill $SRV 2>/dev/null
+
+# --- backup -----------------------------------------------------------------
+chk "backup needs a destination"  "$(rc "$M" backup)" "85"
+chk "backup --to reports integrity" "$("$M" backup --to "$WORK/snap.db" </dev/null | j 'd["integrity"]')" "ok"
+chk "and the byte count is real"  "$("$M" backup --to "$WORK/snap2.db" </dev/null | j 'str(d["bytes"] == __import__("os").path.getsize("'"$WORK"'/snap2.db"))')" "True"
+# a snapshot nobody can open is a hope, not a backup
+chk "the snapshot is a real db"   "$(BKN_DATA=$WORK/snap.db "$M" store count shop/items </dev/null | j 'str(d["total"])')" "3"
+chk "it will not overwrite"       "$(rc "$M" backup --to "$WORK/snap.db")" "85"
+# Count only temps this run creates: the glob is shared with any other bkn on
+# the machine, so an absolute count is somebody else's state.
+BEFORE=$(ls /tmp/bkn-backup-*.db 2>/dev/null | wc -l)
+"$M" backup --stdout > "$WORK/piped.db" 2>/dev/null
+chk "--stdout streams the bytes"  "$(head -c 15 "$WORK/piped.db")" "SQLite format 3"
+chk "and that stream is a real db" "$(BKN_DATA=$WORK/piped.db "$M" store count shop/items </dev/null | j 'str(d["total"])')" "3"
+chk "no temp file left behind"    "$(( $(ls /tmp/bkn-backup-*.db 2>/dev/null | wc -l) - BEFORE ))" "0"
+
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]

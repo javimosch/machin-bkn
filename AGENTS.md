@@ -131,8 +131,8 @@ is absent from `help-json` does not exist for any caller:
 
 | suite | assertions | what it holds |
 |---|---|---|
-| `test/catalog.sh` | 148 | everything listed runs, everything the guide teaches is listed, everything listed is taught |
-| `test/cli-surface.sh` | 57 | store, kv, events, files, locks, cron, hooks, scripts — including a key rotation that must not destroy what it cannot open |
+| `test/catalog.sh` | 156 | everything listed runs, everything the guide teaches is listed, everything listed is taught |
+| `test/cli-surface.sh` | 89 | store, kv, events, files, locks, cron, hooks, scripts — including a key rotation that must not destroy what it cannot open |
 | `test/auth-cli.sh` | 34 | sessions, refresh rotation, revocation, the operator's reset |
 
 Fixture setup for the gate is `test/seed-fixtures.sh`; without it the suites
@@ -493,13 +493,13 @@ The CLI gained the read half it never had -- `version`, `help-json`,
 `store get|list|find|collections`, `files put|get|show|list`, `events
 list|stats`, `script run|runs`, and the read side of `auth`.
 
-It has since been largely finished: 75 of the contract's 87 commands. Eight
-are deliberately out of scope for a verification instrument -- `update`,
-`install`, `uninstall`, `feedback`, `telemetry` and the three `daemon` verbs.
-Nothing here is distributed, so there is nothing to self-update and nothing
-whose usage would be worth counting.
+It is now finished: 79 of the contract's 87 commands, with the genuine gap at
+zero. The eight that remain are deliberately out of scope for a verification
+instrument -- `update`, `install`, `uninstall`, `feedback`, `telemetry` and
+the three `daemon` verbs. Nothing here is distributed, so there is nothing to
+self-update and nothing whose usage would be worth counting.
 
-The other four are open, and how they surfaced is the more useful part. The
+The last four to land are the more useful story. The
 gap read as **zero** against `contract/help-json.json` until that file was
 re-snapshotted from a current bkn, at which point the catalog went from 83
 commands to 87: `backup`, `files sign`, `store access` and `store count` had
@@ -508,6 +508,13 @@ was, and a score measured against a stale contract flatters itself. **Re-sync
 `contract/` before quoting a number from it** -- the whole value of a second
 implementation is that it notices drift, which it cannot do if its copy of the
 contract is assumed rather than refreshed.
+
+All four are implemented now. `store count` and `store access` were exposure
+over machinery that already existed; `backup` is `VACUUM INTO` plus an
+integrity check, because a snapshot nobody has opened is a hope rather than a
+backup; and `files sign` brought signed links, where the URL is the whole
+credential and a tampered or expired one is a 404 rather than a 403 -- the
+same answer as a file that does not exist.
 
 Two of the later additions were not exposure work and are worth naming.
 `bkn.caller` did not exist, so a script could not tell who called it; it is

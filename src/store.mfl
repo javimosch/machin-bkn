@@ -625,6 +625,17 @@ func rollupField(f) (ok) {
   ok = validSegment(f)
 }
 
+// Returns the fields only; rollupJSON wraps them for HTTP. `status` is the
+// same 0-or-400 rollupJSON answers with, not an error string.
+func rollupParts(db, ns, coll, filters, byField, byLimit) (fields, status) {
+  fields = ""
+  body, st := rollupJSON(db, ns, coll, filters, byField, byLimit)
+  status = st
+  if st != 0 { return }
+  // strip the envelope rollupJSON built: `{"ok":true,` ... `}`
+  fields = substr(body, len("{\"ok\":true,"), len(body) - 1)
+}
+
 func rollupJSON(db, ns, coll, filters, byField, byLimit) (out, status) {
   out = ""
   status = 0
@@ -668,8 +679,14 @@ func rollupJSON(db, ns, coll, filters, byField, byLimit) (out, status) {
   }
   buckets = buckets + "]"
 
-  out = "{\"ok\":true,\"buckets\":" + buckets + ",\"total\":" + str(total) +
-        ",\"groups\":" + str(groups) + ",\"truncated\":" + truncated + "}"
+  out = "{\"ok\":true," + rollupFields(buckets, total, groups, truncated) + "}"
+}
+
+// The rollup's fields without an envelope, so the HTTP route and the CLI can
+// each wrap them in their own. Composing beats slicing a built string apart.
+func rollupFields(buckets, total, groups, truncated) (out) {
+  out = "\"buckets\":" + buckets + ",\"total\":" + str(total) +
+        ",\"groups\":" + str(groups) + ",\"truncated\":" + truncated
 }
 
 func listCollections(db, ns) (out) {
@@ -695,4 +712,35 @@ func listCollections(db, ns) (out) {
     i = i + 1
   }
   out = "[" + join(parts, ",") + "]"
+}
+
+// --- backup ---------------------------------------------------------------
+//
+// VACUUM INTO, not a file copy: it takes a consistent snapshot of a database
+// that is being written to, which `cp` of a live SQLite file does not. The
+// snapshot is then opened and integrity-checked, because a backup nobody has
+// read is a hope rather than a backup.
+func backupTo(db, path) (out, err) {
+  out = ""
+  err = ""
+  if path == "" { err = "say where the snapshot goes"  return }
+  if file_size(path) >= 0 { err = "refusing to overwrite " + path  return }
+  // sqlQuote() is for JSON values and passes a bare string through unquoted,
+  // which made this `VACUUM INTO /path/x.db` -- a syntax error. Quote it here.
+  // And unlike sqlite_query, sqlite_exec DOES report failure: check it.
+  rc := sqlite_exec(db, "VACUUM INTO '" + replace(path, "'", "''") + "'", []string{})
+  if rc != 0 { err = "the snapshot could not be written to " + path  return }
+  size := file_size(path)
+  if size < 0 { err = "the snapshot was not written to " + path  return }
+
+  snap := sqlite_open(path)
+  if snap == 0 { err = "the snapshot at " + path + " cannot be opened"  return }
+  rows := sqlite_query(snap, "PRAGMA integrity_check", []string{})
+  integrity := "unknown"
+  if rows != "[]" {
+    v, e := json_get(rows, "[0].integrity_check")
+    if e == "" { integrity = unquote(v) }
+  }
+  if integrity != "ok" { err = "the snapshot failed its integrity check: " + integrity  return }
+  out = "{\"ok\":true,\"snapshot\":" + jsonQuote(path) + ",\"bytes\":" + str(size) + ",\"integrity\":" + jsonQuote(integrity) + "}"
 }
