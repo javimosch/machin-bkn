@@ -463,6 +463,61 @@ func deleteUser(db, idOrEmail) (ok) {
   ok = true
 }
 
+// A session listing is an operator tool: it answers "where is this account
+// signed in, and what is still live". The token hash is never returned --
+// there is nothing useful a reader could do with it that is not an attack.
+type SessionListRow struct { id string  org string  expires_at string  created_at string  revoked_at string }
+
+func sessionsOf(db, idOrEmail) (out, count, err) {
+  out = "[]"
+  count = 0
+  err = ""
+  u, found := findUser(db, idOrEmail)
+  if !found { err = "user not found"  return }
+  rows := sqlite_query(db, "SELECT id, org, expires_at, created_at, revoked_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC", []string{u.id})
+  if rows == "[]" { return }
+  parsed := parse(rows, []SessionListRow{})
+  parts := []string{}
+  now := nowStamp()
+  i := 0
+  while i < len(parsed) {
+    r := parsed[i]
+    // "active" is a derived answer rather than a stored flag, because an
+    // expired session is just as dead as a revoked one and an operator
+    // should not have to compare timestamps to see that.
+    active := "true"
+    if r.revoked_at != "" { active = "false" }
+    if r.expires_at <= now { active = "false" }
+    parts = append(parts, "{\"id\":" + jsonQuote(r.id) + ",\"org\":" + jsonQuote(r.org) + ",\"active\":" + active + ",\"expires_at\":" + jsonQuote(r.expires_at) + ",\"created_at\":" + jsonQuote(r.created_at) + ",\"revoked_at\":" + jsonQuote(r.revoked_at) + "}")
+    i = i + 1
+  }
+  count = len(parsed)
+  out = "[" + join(parts, ",") + "]"
+}
+
+// Sign an account out everywhere. Only live sessions are counted, so the
+// number reported is what the caller actually changed.
+func revokeUserSessions(db, idOrEmail) (n, err) {
+  n = 0
+  err = ""
+  u, found := findUser(db, idOrEmail)
+  if !found { err = "user not found"  return }
+  live := sqlite_query(db, "SELECT id, org, expires_at, created_at, revoked_at FROM sessions WHERE user_id = ? AND revoked_at = ''", []string{u.id})
+  if live != "[]" { n = len(parse(live, []SessionListRow{})) }
+  sqlite_exec(db, "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = ''", []string{nowStamp(), u.id})
+}
+
+// Deleting an org takes its memberships with it. The users survive: an
+// organization going away is not a reason to delete people.
+func deleteOrg(db, slugOrID) (ok) {
+  ok = false
+  o, found := findOrg(db, slugOrID)
+  if !found { return }
+  sqlite_exec(db, "DELETE FROM memberships WHERE org_id = ?", []string{o.id})
+  sqlite_exec(db, "DELETE FROM orgs WHERE id = ?", []string{o.id})
+  ok = true
+}
+
 // roleAtLeast answers the org-role hierarchy: owner > admin > member. An
 // unknown role ranks 0, so a typo denies rather than grants -- the direction
 // an access check should fail in.

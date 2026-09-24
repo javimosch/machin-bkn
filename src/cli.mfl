@@ -18,14 +18,16 @@ func runCLI(a) (code) {
       if a[3] == "create" {
         password := ""
         name := ""
+        role := "user"
         i := 5
         while i < len(a) {
           if a[i] == "--password-stdin" { password = trim(read_stdin()) }
           if a[i] == "--name" { if i+1 < len(a) { name = a[i+1] } }
           if a[i] == "--password" { if i+1 < len(a) { password = a[i+1] } }
+          if a[i] == "--role" { if i+1 < len(a) { role = a[i+1] } }
           i = i + 1
         }
-        user, err := createUser(db, a[4], password, name, "user")
+        user, err := createUser(db, a[4], password, name, role)
         if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
         println("{\"ok\":true,\"user\":" + user + "}")
         return
@@ -544,6 +546,115 @@ func runCLI(a) (code) {
         return
       }
     }
+    if a[2] == "user" {
+      if a[3] == "update" {
+        name := ""
+        role := ""
+        password := ""
+        disabled := false
+        setDisabled := false
+        i := 5
+        while i < len(a) {
+          if a[i] == "--name" { if i+1 < len(a) { name = a[i+1] } }
+          if a[i] == "--role" { if i+1 < len(a) { role = a[i+1] } }
+          if a[i] == "--password" { if i+1 < len(a) { password = a[i+1] } }
+          if a[i] == "--password-stdin" { password = trim(read_stdin()) }
+          if a[i] == "--enable" { disabled = false  setDisabled = true }
+          if a[i] == "--disable" { disabled = true  setDisabled = true }
+          i = i + 1
+        }
+        if name == "" && role == "" && password == "" && !setDisabled {
+          println(cliErr("pass at least one of --name, --role, --password[-stdin], --enable or --disable"))
+          code = 85
+          return
+        }
+        updated, uErr, revoked := updateUser(db, a[4], name, role, password, disabled, setDisabled)
+        if uErr != "" { println(cliErr(uErr))  code = 85  return }
+        rv := "false"
+        if revoked { rv = "true" }
+        println("{\"ok\":true,\"user\":" + userJSON(updated) + ",\"sessions_revoked\":" + rv + "}")
+        return
+      }
+      if a[3] == "delete" {
+        if !deleteUser(db, a[4]) { println(cliErr("user not found"))  code = 81  return }
+        println("{\"ok\":true,\"deleted\":true}")
+        return
+      }
+    }
+    if a[2] == "org" {
+      if a[3] == "delete" {
+        if !deleteOrg(db, a[4]) { println(cliErr("organization not found"))  code = 81  return }
+        println("{\"ok\":true,\"deleted\":true}")
+        return
+      }
+    }
+    if a[2] == "member" {
+      if a[3] == "remove" {
+        ok, err := removeMember(db, a[4], a[5])
+        if err != "" { println(cliErr(err))  code = 81  return }
+        if !ok { println(cliErr("membership not found"))  code = 81  return }
+        println("{\"ok\":true,\"removed\":true}")
+        return
+      }
+    }
+    // --- sessions ---------------------------------------------------------
+    // These take a token as an ARGUMENT rather than reading BKN_ADMIN_TOKEN:
+    // they act as the holder of that token, not as the operator, so which
+    // token is in play must be explicit.
+    if a[2] == "login" {
+      password := ""
+      org := ""
+      i := 4
+      while i < len(a) {
+        if a[i] == "--password-stdin" { password = trim(read_stdin()) }
+        if a[i] == "--password" { if i+1 < len(a) { password = a[i+1] } }
+        if a[i] == "--org" { if i+1 < len(a) { org = a[i+1] } }
+        i = i + 1
+      }
+      tokens, err := login(db, a[3], password, org)
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"tokens\":" + tokens + "}")
+      return
+    }
+    if a[2] == "refresh" {
+      // useSessionOrg: a plain refresh keeps the org the session already had,
+      // so refreshing never silently changes which tenant you are in.
+      tokens, err := refreshTokens(db, a[3], "", true)
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"tokens\":" + tokens + "}")
+      return
+    }
+    if a[2] == "switch-org" {
+      tokens, err := refreshTokens(db, a[3], a[4], false)
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"tokens\":" + tokens + "}")
+      return
+    }
+    if a[2] == "logout" {
+      // Revoking an unknown or already-dead token is a success: the caller's
+      // goal is that it stops working, and it has.
+      logout(db, a[3])
+      println("{\"ok\":true,\"logged_out\":true}")
+      return
+    }
+    if a[2] == "me" {
+      user, claims, err := meFromToken(db, a[3])
+      if err != "" { println(cliErr(err))  code = 85  return }
+      println("{\"ok\":true,\"user\":" + user + ",\"org\":" + jsonQuote(jsonField(claims, ".org")) + "}")
+      return
+    }
+    if a[2] == "sessions" {
+      body, count, err := sessionsOf(db, a[3])
+      if err != "" { println(cliErr(err))  code = 81  return }
+      println("{\"ok\":true,\"count\":" + str(count) + ",\"sessions\":" + body + "}")
+      return
+    }
+    if a[2] == "revoke" {
+      n, err := revokeUserSessions(db, a[3])
+      if err != "" { println(cliErr(err))  code = 81  return }
+      println("{\"ok\":true,\"revoked\":" + str(n) + "}")
+      return
+    }
     if a[2] == "memberships" {
       u, found := findUser(db, a[3])
       if !found { println(cliErr("user not found"))  code = 81  return }
@@ -633,13 +744,24 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"kv get\":{\"args\":[\"key\"],\"flags\":[]}")
   cmds = append(cmds, "\"kv set\":{\"args\":[\"key\",\"value\"],\"flags\":[\"--type <string|json|encrypted>\",\"--public\"]}")
   cmds = append(cmds, "\"kv list\":{\"args\":[],\"flags\":[\"--prefix <p>\"]}")
-  cmds = append(cmds, "\"auth user create\":{\"args\":[\"email\"],\"flags\":[\"--password-stdin\",\"--password <p>\",\"--name <n>\"]}")
+  cmds = append(cmds, "\"auth user create\":{\"args\":[\"email\"],\"flags\":[\"--password-stdin\",\"--password <p>\",\"--name <n>\",\"--role <user|admin>\"]}")
   cmds = append(cmds, "\"auth user list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"auth user show\":{\"args\":[\"email|id\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth user update\":{\"args\":[\"email|id\"],\"flags\":[\"--name <n>\",\"--role <r>\",\"--password <p>\",\"--password-stdin\",\"--enable\",\"--disable\"]}")
+  cmds = append(cmds, "\"auth user delete\":{\"args\":[\"email|id\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth login\":{\"args\":[\"email\"],\"flags\":[\"--password <p>\",\"--password-stdin\",\"--org <slug>\"]}")
+  cmds = append(cmds, "\"auth logout\":{\"args\":[\"refresh-token\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth me\":{\"args\":[\"access-token\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth refresh\":{\"args\":[\"refresh-token\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth switch-org\":{\"args\":[\"refresh-token\",\"org\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth sessions\":{\"args\":[\"user\"],\"flags\":[]}")
+  cmds = append(cmds, "\"auth revoke\":{\"args\":[\"user\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth org create\":{\"args\":[\"slug\"],\"flags\":[\"--name <n>\"]}")
+  cmds = append(cmds, "\"auth org delete\":{\"args\":[\"slug|id\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth org list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"auth org show\":{\"args\":[\"slug|id\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth member add\":{\"args\":[\"org\",\"user\"],\"flags\":[\"--role <owner|admin|member>\"]}")
+  cmds = append(cmds, "\"auth member remove\":{\"args\":[\"org\",\"user\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth member list\":{\"args\":[\"org\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth memberships\":{\"args\":[\"user\"],\"flags\":[]}")
   cmds = append(cmds, "\"auth can\":{\"args\":[\"user\",\"org\",\"min-role\"],\"flags\":[]}")
