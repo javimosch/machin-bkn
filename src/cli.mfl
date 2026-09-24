@@ -6,6 +6,11 @@ func runCLI(a) (code) {
   path := env("BKN_DATA")
   if path == "" { path = "bkn.db" }
   db := storeOpen(path)
+  // The CLI writes the same store the server does, so it runs the same
+  // migrations -- otherwise `script update --run-access` against an older
+  // database would fail on a column the server would have added.
+  accessMigrate(db)
+  scriptMigrate(db)
   if db == 0 { println("cannot open " + path)  code = 110  return }
 
   if a[1] == "auth" {
@@ -162,6 +167,7 @@ func runCLI(a) (code) {
       description := ""
       timeout := 5000
       allowNet := ""
+      runAccess := ""
       i := 4
       while i < len(a) {
         if a[i] == "--file" {
@@ -172,9 +178,10 @@ func runCLI(a) (code) {
         if a[i] == "--description" { if i+1 < len(a) { description = a[i+1] } }
         if a[i] == "--timeout" { if i+1 < len(a) { timeout = parse_int(a[i+1]) } }
         if a[i] == "--allow-net" { if i+1 < len(a) { allowNet = a[i+1] } }
+        if a[i] == "--run-access" { if i+1 < len(a) { runAccess = a[i+1] } }
         i = i + 1
       }
-      out, err := createScript(db, a[3], source, description, timeout, allowNet)
+      out, err := createScript(db, a[3], source, description, timeout, allowNet, runAccess)
       if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
       println("{\"ok\":true,\"script\":" + out + "}")
       return
@@ -182,6 +189,19 @@ func runCLI(a) (code) {
     if a[2] == "list" {
       scripts, count := listScripts(db)
       println("{\"ok\":true,\"count\":" + str(count) + ",\"scripts\":" + scripts + "}")
+      return
+    }
+    if a[2] == "update" {
+      runAccess := ""
+      i := 4
+      while i < len(a) {
+        if a[i] == "--run-access" { if i+1 < len(a) { runAccess = a[i+1] } }
+        i = i + 1
+      }
+      if runAccess == "" { println(cliErr("script update needs --run-access admin|user|public"))  code = 85  return }
+      out, err := updateScriptAccess(db, a[3], runAccess)
+      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
+      println("{\"ok\":true,\"script\":" + out + "}")
       return
     }
     if a[2] == "delete" {

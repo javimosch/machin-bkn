@@ -422,9 +422,12 @@ func removeMember(db, orgRef, userRef) (ok, err) {
 // an account revokes that user's sessions immediately -- the contract says so,
 // and a password change that leaves live sessions behind is not a password
 // change.
-func updateUser(db, idOrEmail, name, role, password, disabled, setDisabled) (user, err) {
+// `revoked` is reported rather than inferred: an operator resetting a password
+// needs to know the old sessions are gone, and a rename must not claim they are.
+func updateUser(db, idOrEmail, name, role, password, disabled, setDisabled) (user, err, revoked) {
   user = emptyUser()
   err = ""
+  revoked = false
   u, found := findUser(db, idOrEmail)
   if !found { err = "user not found"  return }
   revoke := false
@@ -446,6 +449,7 @@ func updateUser(db, idOrEmail, name, role, password, disabled, setDisabled) (use
     sqlite_exec(db, "UPDATE users SET disabled = CAST(? AS INTEGER), updated_at = ? WHERE id = ?", []string{str(d), nowStamp(), u.id})
   }
   if revoke { sqlite_exec(db, "DELETE FROM sessions WHERE user_id = ?", []string{u.id}) }
+  revoked = revoke
   user, _ = findUser(db, u.id)
 }
 

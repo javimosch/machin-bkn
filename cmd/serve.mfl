@@ -215,7 +215,7 @@ func authRoutes(req, q, segs) (res) {
       res = errRes("401 Unauthorized", "bad_credentials", "email or password is incorrect")
       return
     }
-    _, uerr := updateUser(gDB, who.id, "", "", nxt, false, false)
+    _, uerr, _ := updateUser(gDB, who.id, "", "", nxt, false, false)
     if uerr != "" { res = errRes("400 Bad Request", "validation_error", uerr)  return }
     res = jsonRes("200 OK", "{\"ok\":true,\"changed\":true}")
     return
@@ -235,6 +235,31 @@ func authRoutes(req, q, segs) (res) {
         return
       }
       res = jsonRes("201 Created", "{\"ok\":true,\"user\":" + created + "}")
+      return
+    }
+    // PATCH /v1/auth/users/<id-or-email> — the operator's reset. An account
+    // whose password an admin has changed must not keep answering to the old
+    // one anywhere, so the revocation is part of the same call and is reported.
+    if req.method == "PATCH" && len(segs) == 4 {
+      nm := jsonField(req.body, ".name")
+      rl := jsonField(req.body, ".role")
+      pw := jsonField(req.body, ".password")
+      dz, dzErr := json_get(req.body, ".disabled")
+      setDis := dzErr == ""
+      dis := dz == "true"
+      if nm == "" && rl == "" && pw == "" && !setDis {
+        res = errRes("400 Bad Request", "validation_error", "pass at least one of name, role, password or disabled")
+        return
+      }
+      updated, uErr, revoked := updateUser(gDB, segs[3], nm, rl, pw, dis, setDis)
+      if uErr != "" {
+        st, kind := authStatus(uErr)
+        res = errRes(st, kind, uErr)
+        return
+      }
+      rv := "false"
+      if revoked { rv = "true" }
+      res = jsonRes("200 OK", "{\"ok\":true,\"user\":" + userJSON(updated) + ",\"sessions_revoked\":" + rv + "}")
       return
     }
     users, count := listUsers(gDB, qInt(q, "limit", 50), qInt(q, "offset", 0))
@@ -282,6 +307,23 @@ func authRoutes(req, q, segs) (res) {
 // headersJSON serializes the request headers for the script. MFL cannot
 // enumerate a JSON object, but machweb hands us a real map, so this is the
 // one place the header set is turned into JSON by hand.
+// A script names its headers however it likes ("Content-Type", "content-type"),
+// so the lookup is case-insensitive over the keys the script actually sent.
+func headerFromJSON(hdrs, want) (out) {
+  out = ""
+  rows := sqlite_query(gDB, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{hdrs})
+  if rows == "[]" { return }
+  parsed := parse(rows, []GroupRow{})
+  i := 0
+  while i < len(parsed) {
+    if to_lower(parsed[i].k) == want {
+      v, e := json_get(hdrs, "." + parsed[i].k)
+      if e == "" { out = jsonUnquote(v)  return }
+    }
+    i = i + 1
+  }
+}
+
 func headersJSON(req) (out) {
   parts := []string{}
   for _, k := range keys(req.headers) {
@@ -350,7 +392,15 @@ func hooksRoutes(req, q, segs) (res) {
   status := "200 OK"
   st, stErr := json_get(value, ".status")
   if stErr == "" { status = statusLine(st) }
+  hdrs, hdrErr := json_get(value, ".headers")
   ctype := jsonField(value, ".content_type")
+  // A script declares its content type the way every HTTP handler does -- in
+  // `headers` -- so that is looked at too. Reading only `.content_type` left a
+  // CSV export as a JSON-encoded string under a second, contradictory
+  // Content-Type header.
+  if ctype == "" {
+    if hdrErr == "" { ctype = headerFromJSON(hdrs, "content-type") }
+  }
   if ctype == "" { ctype = "application/json" }
   body, bodyErr := json_get(value, ".body")
   if bodyErr != "" { body = value }
@@ -366,7 +416,6 @@ func hooksRoutes(req, q, segs) (res) {
   // A script that returns headers gets them verbatim. Caching, a redirect's
   // Location and a conditional GET's ETag are all decisions the handler owns:
   // the core cannot know a bundle's identity or a rule's target.
-  hdrs, hdrErr := json_get(value, ".headers")
   if hdrErr == "" {
     rows := sqlite_query(gDB, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{hdrs})
     if rows != "[]" {
@@ -374,8 +423,13 @@ func hooksRoutes(req, q, segs) (res) {
       i := 0
       while i < len(parsed) {
         name := parsed[i].k
-        v, e := json_get(hdrs, "." + name)
-        if e == "" { r = with_header(r, name, jsonUnquote(v)) }
+        // response() already wrote Content-Type; with_header appends rather
+        // than replaces, so re-emitting it here is how a response ends up
+        // carrying two contradictory ones.
+        if to_lower(name) != "content-type" {
+          v, e := json_get(hdrs, "." + name)
+          if e == "" { r = with_header(r, name, jsonUnquote(v)) }
+        }
         i = i + 1
       }
     }
@@ -477,7 +531,74 @@ func cronRoutes(req, q, segs) (res) {
   res = jsonRes("200 OK", "{\"ok\":true,\"job\":" + jobJSON(j) + "}")
 }
 
+// Who is asking, as the script will see them. Admin is decided first: an admin
+// token is not a user token and must not be looked up as one.
+func callerOf(req) (kind, sub, org) {
+  kind = "anon"
+  sub = ""
+  org = ""
+  if authed(req, gAdmin, gHost) { kind = "admin"  return }
+  tok := bearer(req)
+  if tok == "" { return }
+  whoJ, whoClaims, whoErr := meFromToken(gDB, tok)
+  if whoErr != "" { return }
+  kind = "user"
+  sub = jsonField(whoJ, ".id")
+  org = jsonField(whoClaims, ".org")
+}
+
+// 401 when a credential would help, 403 when it would not. A script the caller
+// may not run is also indistinguishable from one that does not exist, or a 404
+// becomes a way to enumerate what an operator installed.
+func mayRun(access, kind) (allow, status, code, msg) {
+  allow = false
+  status = "403 Forbidden"
+  code = "not_authenticated"
+  msg = "no such script"
+  if access == "public" { allow = true  return }
+  if kind == "admin" { allow = true  return }
+  if access == "user" {
+    if kind == "user" { allow = true  return }
+    status = "401 Unauthorized"
+    code = "not_authenticated"
+    msg = "this script needs a signed-in caller"
+    return
+  }
+}
+
+func scriptRunRoute(req, name) (res) {
+  kind, sub, org := callerOf(req)
+  s, found := findScript(gDB, name)
+  access := ""
+  if found { access = runAccessOf(s) }
+  // An unknown script is judged as if it were the most closed thing it could
+  // be, so "does not exist" and "you may not run it" look the same from outside.
+  if !found { access = "admin" }
+  allow, status, code, msg := mayRun(access, kind)
+  if !allow { res = errRes(status, code, msg)  return }
+  if !found { res = errRes("404 Not Found", "not_found", "no such script")  return }
+
+  started := now_ms()
+  value, err := runScriptAs(gDB, name, req.body, callerJSON(kind, sub, org))
+  took := now_ms() - started
+  if err != "" {
+    res = jsonRes("200 OK", "{\"ok\":false,\"status\":\"error\",\"took_ms\":" + str(took) + ",\"error\":" + jsonQuote(err) + ",\"value\":null}")
+    return
+  }
+  res = jsonRes("200 OK", "{\"ok\":true,\"status\":\"ok\",\"took_ms\":" + str(took) + ",\"value\":" + value + "}")
+}
+
 func scriptRoutes(req, q, segs) (res) {
+  // The run route carries its own policy, so it is handled before the blanket
+  // admin gate that protects creating, listing and deleting scripts.
+  if len(segs) == 4 {
+    if segs[3] == "run" {
+      if req.method == "POST" {
+        res = scriptRunRoute(req, segs[2])
+        return
+      }
+    }
+  }
   if !authed(req, gAdmin, gHost) { res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")  return }
 
   if len(segs) == 2 {
@@ -490,14 +611,7 @@ func scriptRoutes(req, q, segs) (res) {
 
   if len(segs) == 4 {
     if segs[3] == "run" {
-      started := now_ms()
-      value, err := runScript(gDB, name, req.body)
-      took := now_ms() - started
-      if err != "" {
-        res = jsonRes("200 OK", "{\"ok\":false,\"status\":\"error\",\"took_ms\":" + str(took) + ",\"error\":" + jsonQuote(err) + ",\"value\":null}")
-        return
-      }
-      res = jsonRes("200 OK", "{\"ok\":true,\"status\":\"ok\",\"took_ms\":" + str(took) + ",\"value\":" + value + "}")
+      res = errRes("405 Method Not Allowed", "method_not_allowed", "a script is run with POST")
       return
     }
     if segs[3] == "runs" {
@@ -757,10 +871,19 @@ func main() {
   port := 7799
   p := env("BKN_PORT")
   if p != "" { if looksNumeric(p) { port = int(parse(p, 0)) } }
+  // Flags win over the environment: a harness that starts its own instance on
+  // a random port says so on the command line.
+  fi := 2
+  while fi < len(a) {
+    if a[fi] == "--host" { if fi+1 < len(a) { gHost = a[fi+1] } }
+    if a[fi] == "--port" { if fi+1 < len(a) { if looksNumeric(a[fi+1]) { port = int(parse(a[fi+1], 0)) } } }
+    fi = fi + 1
+  }
 
   gDB = storeOpen(path)
   // A store written before policies existed gains the column on open.
   accessMigrate(gDB)
+  scriptMigrate(gDB)
   if gDB == 0 { println("cannot open " + path)  return }
   // The scheduler is part of the server, not a separate process: a job that
   // only fires when someone remembers to run a ticker is not a schedule.

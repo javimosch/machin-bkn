@@ -148,8 +148,11 @@ static const char *BKN_PRELUDE =
 "  memberships: function (u) { return __call('auth.memberships', [u]); },\n"
 "  issue: function (u, o) { return __call('auth.issue', [u, o || '']); },\n"
 "  verify: function (t) { return __call('auth.verify', [t]); } };\n"
-"globalThis.bkn = { auth: auth, crypto: crypto, events: events, files: files,\n"
-"  http: http, id: id, kv: kv, lock: lock, log: log, now: now, store: store };\n";
+// caller is DATA, not a function: a script reads bkn.caller.kind. It is asked
+// for once, here, so the identity cannot change under a script mid-run.
+"globalThis.bkn = { auth: auth, caller: __call('caller.get', []), crypto: crypto,\n"
+"  events: events, files: files, http: http, id: id, kv: kv, lock: lock,\n"
+"  log: log, now: now, store: store };\n";
 
 static char *dup_json_err(JSContext *ctx, JSValue exc) {
     const char *msg = JS_ToCString(ctx, exc);

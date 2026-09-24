@@ -8,39 +8,64 @@
 // nothing else.
 
 func scriptSchema() (s) {
-  s = "CREATE TABLE IF NOT EXISTS scripts (name TEXT PRIMARY KEY, source TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 5000, allow_net TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS script_runs (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, took_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', logs TEXT NOT NULL DEFAULT '[]', value TEXT NOT NULL DEFAULT 'null', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS script_runs_name ON script_runs(name, created_at DESC);"
+  s = "CREATE TABLE IF NOT EXISTS scripts (name TEXT PRIMARY KEY, source TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', timeout_ms INTEGER NOT NULL DEFAULT 5000, allow_net TEXT NOT NULL DEFAULT '', run_access TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS script_runs (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, took_ms INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', logs TEXT NOT NULL DEFAULT '[]', value TEXT NOT NULL DEFAULT 'null', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS script_runs_name ON script_runs(name, created_at DESC);"
 }
 
 // The host objects a script sees. Kept as one sorted, comma-joined string
 // because it is contract: a script that probes for a capability must get the
 // same answer from every build.
-func sandboxSurface() (s) { s = "auth,crypto,events,files,http,id,kv,lock,log,now,store" }
+func sandboxSurface() (s) { s = "auth,caller,crypto,events,files,http,id,kv,lock,log,now,store" }
 
-type ScriptRow struct { name string  source string  description string  timeout_ms int  allow_net string  enabled int  created_at string  updated_at string }
+type ScriptRow struct { name string  source string  description string  timeout_ms int  allow_net string  run_access string  enabled int  created_at string  updated_at string }
 
 func scriptJSON(s) (out) {
   out = "{\"name\":" + jsonQuote(s.name) + ",\"description\":" + jsonQuote(s.description) + ",\"timeout_ms\":" + str(s.timeout_ms) + ",\"allow_net\":" + typeListJSON(s.allow_net) + ",\"enabled\":"
   if s.enabled == 1 { out = out + "true" } else { out = out + "false" }
-  out = out + ",\"bytes\":" + str(len(s.source)) + ",\"created_at\":" + jsonQuote(s.created_at) + ",\"updated_at\":" + jsonQuote(s.updated_at) + "}"
+  out = out + ",\"run_access\":" + jsonQuote(runAccessOf(s)) + ",\"bytes\":" + str(len(s.source)) + ",\"created_at\":" + jsonQuote(s.created_at) + ",\"updated_at\":" + jsonQuote(s.updated_at) + "}"
 }
 
-func scriptColumns() (s) { s = "SELECT name, source, description, timeout_ms, allow_net, enabled, created_at, updated_at FROM scripts" }
+func scriptColumns() (s) { s = "SELECT name, source, description, timeout_ms, allow_net, run_access, enabled, created_at, updated_at FROM scripts" }
 
-func createScript(db, name, source, description, timeoutMs, allowNet) (out, err) {
+// A store written before run policies existed gains the column on open, so an
+// upgrade does not need a dump and reload. An empty value is UNDECLARED, which
+// means admin-only -- every script installed before this existed keeps exactly
+// the permissions it had.
+func scriptMigrate(db) {
+  sqlite_exec(db, "ALTER TABLE scripts ADD COLUMN run_access TEXT NOT NULL DEFAULT ''", []string{})
+}
+
+func validRunAccess(a) (ok) {
+  ok = false
+  if a == "admin" { ok = true }
+  if a == "user" { ok = true }
+  if a == "public" { ok = true }
+}
+
+// Undeclared reads as "admin" everywhere it is shown, because that is what it
+// means. Reporting "" would make an operator go and look it up.
+func runAccessOf(s) (a) {
+  a = s.run_access
+  if a == "" { a = "admin" }
+}
+
+func createScript(db, name, source, description, timeoutMs, allowNet, runAccess) (out, err) {
   out = ""
   err = ""
   if !validSegment(name) { err = "script name must be lowercase and start with a letter"  return }
   if source == "" { err = "script source is empty"  return }
+  if runAccess != "" {
+    if !validRunAccess(runAccess) { err = "run-access must be admin, user or public"  return }
+  }
   if timeoutMs <= 0 { timeoutMs = 5000 }
   stamp := nowStamp()
-  sqlite_exec(db, "INSERT INTO scripts (name, source, description, timeout_ms, allow_net, enabled, created_at, updated_at) VALUES (?,?,?,CAST(? AS INTEGER),?,1,?,?) ON CONFLICT(name) DO UPDATE SET source = excluded.source, description = excluded.description, timeout_ms = excluded.timeout_ms, allow_net = excluded.allow_net, updated_at = excluded.updated_at", []string{name, source, description, str(timeoutMs), allowNet, stamp, stamp})
+  sqlite_exec(db, "INSERT INTO scripts (name, source, description, timeout_ms, allow_net, run_access, enabled, created_at, updated_at) VALUES (?,?,?,CAST(? AS INTEGER),?,?,1,?,?) ON CONFLICT(name) DO UPDATE SET source = excluded.source, description = excluded.description, timeout_ms = excluded.timeout_ms, allow_net = excluded.allow_net, run_access = excluded.run_access, updated_at = excluded.updated_at", []string{name, source, description, str(timeoutMs), allowNet, runAccess, stamp, stamp})
   s, stored := findScript(db, name)
   if !stored { err = "the script was not stored (the database may be locked by another process)"  return }
   out = scriptJSON(s)
 }
 
 func findScript(db, name) (s, found) {
-  s = ScriptRow{name: "", source: "", description: "", timeout_ms: 0, allow_net: "", enabled: 0, created_at: "", updated_at: ""}
+  s = ScriptRow{name: "", source: "", description: "", timeout_ms: 0, allow_net: "", run_access: "", enabled: 0, created_at: "", updated_at: ""}
   found = false
   rows := sqlite_query(db, scriptColumns() + " WHERE name = ?", []string{name})
   if rows == "[]" { return }
@@ -64,6 +89,19 @@ func listScripts(db) (out, count) {
   }
   count = len(parsed)
   out = "[" + join(parts, ",") + "]"
+}
+
+// Changing the audience must not require re-uploading the source: an operator
+// closing a script in a hurry should not have to find the file again.
+func updateScriptAccess(db, name, runAccess) (out, err) {
+  out = ""
+  err = ""
+  if !validRunAccess(runAccess) { err = "run-access must be admin, user or public"  return }
+  _, found := findScript(db, name)
+  if !found { err = "script not found"  return }
+  sqlite_exec(db, "UPDATE scripts SET run_access = ?, updated_at = ? WHERE name = ?", []string{runAccess, nowStamp(), name})
+  s, _ := findScript(db, name)
+  out = scriptJSON(s)
 }
 
 func deleteScript(db, name) (err) {
@@ -137,7 +175,28 @@ func hostErr(message) (out) { out = "{\"ok\":false,\"error\":" + jsonQuote(messa
 // hostCall is the whole host surface. `export` marks it a reachability root:
 // nothing in MFL calls it, so without that the compiler would eliminate it and
 // the bridge would fail to link (see finding 12).
+// The identity of whoever triggered the run in progress. It is a global
+// because a run is single-threaded from the host's point of view: the script
+// is evaluated to completion inside runScriptAs before the next one starts.
+var gCaller = ""
+
+// A caller is always a complete shape, so a script can read .kind without
+// guarding. Anonymous means empty strings, never missing keys.
+func callerJSON(kind, sub, org) (out) {
+  out = "{\"kind\":" + jsonQuote(kind) + ",\"sub\":" + jsonQuote(sub) + ",\"org\":" + jsonQuote(org) + "}"
+}
+
+func anonCaller() (out) { out = callerJSON("anon", "", "") }
+
 export func hostCall(op, argsJSON, db, name, net) (out) {
+  // Asked for by the prelude before the script runs, so it must be answered
+  // whether or not a datastore is bound.
+  if op == "caller.get" {
+    c := gCaller
+    if c == "" { c = anonCaller() }
+    out = hostOK(c)
+    return
+  }
   if db == 0 { out = hostErr("no datastore bound to this run")  return }
 
   if op == "crypto.hmac" { out = hostOK(jsonQuote(hmac_sha256(argAt(argsJSON, 0), argAt(argsJSON, 1))))  return }
@@ -289,7 +348,7 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
   if op == "store.find" {
     ns, coll, refErr := splitRef(argAt(argsJSON, 0))
     if refErr != "" { out = hostErr(refErr)  return }
-    doc, found := findDoc(db, ns, coll, optFilters(db, argRaw(argsJSON, 1)))
+    doc, found := findDoc(db, ns, coll, filtersFromWhere(db, argRaw(argsJSON, 1)))
     if !found { out = hostOK("null")  return }
     out = hostOK(doc)
     return
@@ -297,7 +356,7 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
   if op == "store.count" {
     ns, coll, refErr := splitRef(argAt(argsJSON, 0))
     if refErr != "" { out = hostErr(refErr)  return }
-    out = hostOK(str(countDocs(db, ns, coll, optFilters(db, argRaw(argsJSON, 1)))))
+    out = hostOK(str(countDocs(db, ns, coll, filtersFromWhere(db, argRaw(argsJSON, 1)))))
     return
   }
 
@@ -342,7 +401,7 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
     if v3e == "" { uPass = unescape(unquote(v3)) }
     v4, v4e := json_get(argRaw(argsJSON, 1), ".disabled")
     if v4e == "" { uSetDis = true  uDis = v4 == "true" }
-    uu, uuErr := updateUser(db, argAt(argsJSON, 0), uName, uRole, uPass, uDis, uSetDis)
+    uu, uuErr, _ := updateUser(db, argAt(argsJSON, 0), uName, uRole, uPass, uDis, uSetDis)
     if uuErr != "" { out = hostErr(uuErr)  return }
     out = hostOK(userJSON(uu))
     return
@@ -578,10 +637,62 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
 // optFilters turns a script's { where: { field: value } } into the same
 // filter list the HTTP surface builds, so a query means the same thing from
 // either side.
+// `{gt: 5}` / `{in: ["live","archived"]}` — every operator key the object
+// carries becomes its own filter on the same field.
+func appendOpObject(db, acc, field, obj) (out) {
+  out = acc
+  rows := sqlite_query(db, "SELECT key AS k, 0 AS n FROM json_each(?)", []string{obj})
+  if rows == "[]" { return }
+  ops := parse(rows, []GroupRow{})
+  j := 0
+  while j < len(ops) {
+    op := ops[j].k
+    if isOperator(op) {
+      ov, oe := json_get(obj, "." + op)
+      if oe == "" {
+        // `in` takes a list; downstream wants it comma-joined, which is also
+        // the shape the flat form arrives in.
+        if has_prefix(trim(ov), "[") {
+          out = append(out, Filter{field: field, op: op, value: joinJSONArray(db, ov)})
+        } else {
+          out = append(out, Filter{field: field, op: op, value: unescape(unquote(ov))})
+        }
+      }
+    }
+    j = j + 1
+  }
+}
+
+func joinJSONArray(db, arr) (out) {
+  out = ""
+  // json_each's `value` column is the SQL value, so a JSON string element
+  // arrives already unquoted -- which is exactly what the comma list wants.
+  rows := sqlite_query(db, "SELECT value AS k, 0 AS n FROM json_each(?)", []string{arr})
+  if rows == "[]" { return }
+  vals := parse(rows, []GroupRow{})
+  parts := []string{}
+  j := 0
+  while j < len(vals) {
+    parts = append(parts, vals[j].k)
+    j = j + 1
+  }
+  out = join(parts, ",")
+}
+
+// store.list takes an options envelope and names its conditions under `where`;
+// store.find and store.count take the conditions THEMSELVES as their second
+// argument. Running the envelope reader over a bare criteria object found no
+// `.where` and quietly returned no filters at all -- so find() answered with
+// whatever happened to be first in the collection.
 func optFilters(db, opts) (out) {
   out = []Filter{}
   where, err := json_get(opts, ".where")
   if err != "" { return }
+  out = filtersFromWhere(db, where)
+}
+
+func filtersFromWhere(db, where) (out) {
+  out = []Filter{}
   // MFL has no way to enumerate a JSON object's keys, so SQLite's json_each
   // does it. Only `key` is selected: json_each's `value` column is the SQL
   // value for scalars, which json() then refuses for strings.
@@ -593,18 +704,27 @@ func optFilters(db, opts) (out) {
     k := parsed[i].k
     v, e := json_get(where, "." + k)
     if e == "" {
-      raw := unescape(unquote(v))
-      op := "eq"
-      value := raw
-      colon := index(raw, ":")
-      if colon > 0 {
-        candidate := substr(raw, 0, colon)
-        if isOperator(candidate) {
-          op = candidate
-          value = substr(raw, colon+1, len(raw))
+      // A condition comes in one of two shapes: the flat `"op:value"` string,
+      // and the nested `{field: {op: value}}` object a JS caller writes
+      // naturally. Only the flat one was understood, so every nested condition
+      // silently became an equality against a serialized object -- which
+      // matched nothing and looked exactly like a query with no results.
+      if has_prefix(trim(v), "{") {
+        out = appendOpObject(db, out, k, v)
+      } else {
+        raw := unescape(unquote(v))
+        op := "eq"
+        value := raw
+        colon := index(raw, ":")
+        if colon > 0 {
+          candidate := substr(raw, 0, colon)
+          if isOperator(candidate) {
+            op = candidate
+            value = substr(raw, colon+1, len(raw))
+          }
         }
+        out = append(out, Filter{field: k, op: op, value: value})
       }
-      out = append(out, Filter{field: k, op: op, value: value})
     }
     i = i + 1
   }
@@ -636,9 +756,16 @@ func netAllowed(csv, url) (ok) {
 // runScript evaluates a stored script. The registry, the history and the
 // timeout are enforced here; the sandbox's shape is the prelude in
 // vendor/bkn_qjs.c.
+// A run with no identified caller. Cron and the CLI use this: there is nobody
+// on the other end of them.
 func runScript(db, name, input) (value, err) {
+  value, err = runScriptAs(db, name, input, anonCaller())
+}
+
+func runScriptAs(db, name, input, caller) (value, err) {
   value = "null"
   err = ""
+  gCaller = caller
   s, found := findScript(db, name)
   if !found { err = "script not found"  return }
   if s.enabled != 1 { err = "script is disabled" return }
