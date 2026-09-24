@@ -1,0 +1,186 @@
+// access — collection access policies.
+//
+// From the contract: "What a collection allows a non-admin caller to do,
+// declared on the collection: a verb (read, create, update, delete) mapped to
+// an audience (admin, user, owner, org, public). Undeclared means admin-only,
+// so a collection nobody has spoken about behaves exactly as it always did.
+// 'owner' and 'org' also scope: they need --owner-field or --org-field naming
+// the document field that holds the user or org id, and bkn applies that as
+// part of every read and write rather than as a check beside it."
+//
+// That last clause is the whole design. A scope applied BESIDE a query is a
+// filter somebody can forget; applied as PART of it, a cross-tenant read
+// cannot be expressed at all — which is why a stranger's document answers 404
+// rather than 403. It was never in the result set to refuse.
+
+// The column is added to an existing database rather than only to the CREATE,
+// so a store written before policies existed picks them up on open.
+func accessMigrate(db) {
+  sqlite_exec(db, "ALTER TABLE collections ADD COLUMN access TEXT NOT NULL DEFAULT '{}'", []string{})
+}
+
+func validAudience(a) (ok) {
+  ok = false
+  if a == "admin" { ok = true }
+  if a == "user" { ok = true }
+  if a == "owner" { ok = true }
+  if a == "org" { ok = true }
+  if a == "public" { ok = true }
+}
+
+func validVerb(v) (ok) {
+  ok = false
+  if v == "read" { ok = true }
+  if v == "create" { ok = true }
+  if v == "update" { ok = true }
+  if v == "delete" { ok = true }
+}
+
+type RuleRow struct { key string  val string }
+
+// validateAccess refuses a policy that cannot be enforced. A rule naming
+// 'owner' without an owner_field would silently degrade to "any signed-in
+// user", which is the opposite of what it says, so it is rejected at
+// declaration rather than discovered in production.
+func validateAccess(db, acc) (err) {
+  err = ""
+  if acc == "" { return }
+  if acc == "{}" { return }
+  ownerField := jsonField(acc, ".owner_field")
+  orgField := jsonField(acc, ".org_field")
+  rules := jsonField(acc, ".rules")
+  if rules == "" { err = "access needs a rules object"  return }
+  // json_each already unwraps the value; running json_extract over it would
+  // be handed a bare word like `owner`, which is malformed JSON, and the whole
+  // query would come back empty rather than erroring.
+  rows := sqlite_query(db, "SELECT key AS key, value AS val FROM json_each(?)", []string{rules})
+  if rows == "[]" { err = "access needs at least one rule"  return }
+  parsed := parse(rows, []RuleRow{})
+  i := 0
+  while i < len(parsed) {
+    v := parsed[i].key
+    a := parsed[i].val
+    if !validVerb(v) { err = "unknown verb " + v  return }
+    if !validAudience(a) { err = "unknown audience " + a  return }
+    if a == "owner" { if ownerField == "" { err = "a policy naming owner needs an owner_field"  return } }
+    if a == "org" { if orgField == "" { err = "a policy naming org needs an org_field"  return } }
+    i = i + 1
+  }
+}
+
+func setAccess(db, ns, coll, acc) {
+  ensureCollection(db, ns, coll)
+  sqlite_exec(db, "UPDATE collections SET access = ? WHERE ns = ? AND name = ?", []string{acc, ns, coll})
+}
+
+func accessOf(db, ns, coll) (acc) {
+  acc = "{}"
+  rows := sqlite_query(db, "SELECT COALESCE(access,'{}') AS a FROM collections WHERE ns = ? AND name = ?", []string{ns, coll})
+  if rows == "[]" { return }
+  acc = jsonString(rows, "[0].a", "{}")
+  if acc == "" { acc = "{}" }
+}
+
+// audienceFor returns the audience a verb is open to, or "" when the verb was
+// never declared — which the contract defines as admin-only.
+func audienceFor(acc, verb) (a) {
+  a = ""
+  if acc == "{}" { return }
+  a = jsonField(acc, ".rules." + verb)
+}
+
+// Decision carries everything the route needs: whether to serve, and if not,
+// whether a credential would have helped. 401 says refresh; 403 says give up.
+type Decision struct { allow bool  status string  kind string  msg string  scopeField string  scopeValue string }
+
+func denyAuth() (d) {
+  d = Decision{allow: false, status: "401 Unauthorized", kind: "not_authenticated", msg: "this collection needs a signed-in caller", scopeField: "", scopeValue: ""}
+}
+
+func denyForbidden(m) (d) {
+  d = Decision{allow: false, status: "403 Forbidden", kind: "forbidden", msg: m, scopeField: "", scopeValue: ""}
+}
+
+func allowUnscoped() (d) {
+  d = Decision{allow: true, status: "", kind: "", msg: "", scopeField: "", scopeValue: ""}
+}
+
+func allowScoped(f, v) (d) {
+  d = Decision{allow: true, status: "", kind: "", msg: "", scopeField: f, scopeValue: v}
+}
+
+// decideAccess is the whole policy in one place, so a route cannot implement
+// half of it. isAdmin short-circuits: the admin token is the operator, and the
+// contract keeps an undeclared collection behaving exactly as it always did.
+func decideAccess(db, acc, verb, isAdmin, hasToken, sub, org) (d) {
+  d = allowUnscoped()
+  if isAdmin { return }
+  a := audienceFor(acc, verb)
+  if a == "" {
+    // Undeclared: admin-only, and a user credential would not help, so 403
+    // rather than 401 even for an anonymous caller.
+    d = denyForbidden("this collection is administered privately")
+    return
+  }
+  if a == "public" { return }
+  if a == "admin" {
+    d = denyForbidden("this collection is administered privately")
+    return
+  }
+  if !hasToken {
+    // A credential WOULD help here — say so, so a client knows to refresh
+    // rather than to give up.
+    d = denyAuth()
+    return
+  }
+  if a == "user" { return }
+  if a == "owner" {
+    f := jsonField(acc, ".owner_field")
+    if f == "" { d = denyForbidden("this collection has no owner_field")  return }
+    if sub == "" { d = denyAuth()  return }
+    d = allowScoped(f, sub)
+    return
+  }
+  if a == "org" {
+    f2 := jsonField(acc, ".org_field")
+    if f2 == "" { d = denyForbidden("this collection has no org_field")  return }
+    // An orgless token must be refused rather than read as unscoped: falling
+    // through would hand every tenant's documents to somebody who forgot to
+    // pick one.
+    if org == "" { d = denyForbidden("this collection is scoped to an organization; sign in with one")  return }
+    d = allowScoped(f2, org)
+    return
+  }
+  d = denyForbidden("unknown audience")
+}
+
+// verbFor maps an HTTP method onto the contract's four verbs. A POST to a
+// collection creates; a PATCH updates; there is no verb for "list" separate
+// from "read", because the contract does not draw that line.
+func verbFor(method, hasID) (v) {
+  v = "read"
+  if method == "POST" { v = "create" }
+  if method == "PUT" { v = "create" }
+  if method == "PATCH" { v = "update" }
+  if method == "DELETE" { v = "delete" }
+}
+
+// scopedFilters folds the tenancy scope INTO the caller's filters rather than
+// applying it afterwards. That is what makes "a filter cannot widen the scope"
+// true by construction: the scope is ANDed with whatever was asked for, and
+// the query surface has no OR to escape through.
+func scopedFilters(filters, dec) (out) {
+  out = filters
+  if dec.scopeField == "" { return }
+  out = append(out, Filter{field: dec.scopeField, op: "eq", value: dec.scopeValue})
+}
+
+// refusesHandover reports a patch that would move a document out of the
+// caller's own scope. Without it, "update" would quietly include "give away".
+func refusesHandover(patch, dec) (bad) {
+  bad = false
+  if dec.scopeField == "" { return }
+  v := jsonField(patch, "." + dec.scopeField)
+  if v == "" { return }
+  if v != dec.scopeValue { bad = true }
+}

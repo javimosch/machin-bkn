@@ -4,7 +4,7 @@ var gAdmin = ""
 var gHost = "127.0.0.1"
 var gScheduler = 0
 
-func storeRoutes(req, q, segs) (res, handled) {
+func storeRoutes(req, q, segs, dec) (res, handled) {
   handled = true
   ns := segs[2]
   coll := segs[3]
@@ -18,13 +18,13 @@ func storeRoutes(req, q, segs) (res, handled) {
       // listing entirely rather than decorating it.
       by := qGet(q, "by")
       if by != "" {
-        body, rstatus := rollupJSON(gDB, ns, coll, filtersFrom(q), by, qInt(q, "by_limit", 0))
+        body, rstatus := rollupJSON(gDB, ns, coll, scopedFilters(filtersFrom(q), dec), by, qInt(q, "by_limit", 0))
         if rstatus == 400 { res = errRes("400 Bad Request", "validation_error", "cannot group by " + by)  handled = true  return }
         res = jsonRes("200 OK", body)
         handled = true
         return
       }
-      filters := filtersFrom(q)
+      filters := scopedFilters(filtersFrom(q), dec)
       limit := qInt(q, "limit", 50)
       offset := qInt(q, "offset", 0)
       orderBy := qGet(q, "order_by")
@@ -40,8 +40,41 @@ func storeRoutes(req, q, segs) (res, handled) {
       res = jsonRes("200 OK", "{\"ok\":true,\"collection\":" + jsonQuote(ref) + ",\"count\":" + str(count) + ",\"total\":" + str(total) + ",\"records\":" + records + "}")
       return
     }
+    // PUT declares the collection itself — normalizers and, now, its access
+    // policy. Declaring over HTTP is how a deployment behind a reverse proxy
+    // gets a policy at all.
+    if req.method == "PUT" {
+      acc := jsonField(req.body, ".access")
+      if acc != "" {
+        aerr := validateAccess(gDB, acc)
+        if aerr != "" { res = errRes("400 Bad Request", "validation_error", aerr)  return }
+        setAccess(gDB, ns, coll, acc)
+      }
+      norm := jsonField(req.body, ".normalize")
+      if norm != "" { setNormalizers(gDB, ns, coll, norm) }
+      ensureCollection(gDB, ns, coll)
+      res = jsonRes("200 OK", "{\"ok\":true,\"collection\":{\"ns\":" + jsonQuote(ns) + ",\"name\":" + jsonQuote(coll) + ",\"access\":" + accessOf(gDB, ns, coll) + ",\"normalize\":" + normalizersOf(gDB, ns, coll) + "}}")
+      return
+    }
     if req.method == "POST" {
-      record, err := putDoc(gDB, ns, coll, qGet(q, "id"), req.body)
+      // A create stamps the caller's own scope, so a body claiming somebody
+      // else's owner id cannot take effect — and an upsert at a stranger's id
+      // is a 404, not a silent takeover.
+      body := req.body
+      if dec.scopeField != "" {
+        if qGet(q, "id") != "" {
+          existing, had := getDoc(gDB, ns, coll, qGet(q, "id"))
+          if had {
+            if jsonField(existing, "." + dec.scopeField) != dec.scopeValue {
+              res = errRes("404 Not Found", "not_found", "record not found")
+              return
+            }
+          }
+        }
+        stamped := sqlite_query(gDB, "SELECT json_set(?, ?, ?) AS d", []string{body, "$." + dec.scopeField, dec.scopeValue})
+        if stamped != "[]" { body = jsonString(stamped, "[0].d", body) }
+      }
+      record, err := putDoc(gDB, ns, coll, qGet(q, "id"), body)
       if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
       res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")
       return
@@ -51,6 +84,17 @@ func storeRoutes(req, q, segs) (res, handled) {
   }
 
   id := segs[4]
+  // Scope is part of the lookup, not a check beside it: a document that is
+  // not yours was never in the result set, so it answers 404 rather than
+  // 403. A 403 would confirm it exists.
+  if dec.scopeField != "" {
+    owned, ownedFound := getDoc(gDB, ns, coll, id)
+    if !ownedFound { res = errRes("404 Not Found", "not_found", "record not found")  return }
+    if jsonField(owned, "." + dec.scopeField) != dec.scopeValue {
+      res = errRes("404 Not Found", "not_found", "record not found")
+      return
+    }
+  }
   if req.method == "GET" {
     record, found := getDoc(gDB, ns, coll, id)
     if !found { res = errRes("404 Not Found", "not_found", "record not found")  return }
@@ -58,6 +102,12 @@ func storeRoutes(req, q, segs) (res, handled) {
     return
   }
   if req.method == "PATCH" {
+    // Update must not mean "give away": a patch that rewrites the scope field
+    // to somebody else is refused outright rather than silently applied.
+    if refusesHandover(req.body, dec) {
+      res = errRes("403 Forbidden", "forbidden", "you cannot move this record out of your own scope")
+      return
+    }
     record, found, err, status := patchDocIf(gDB, ns, coll, id, req.body, qGet(q, "if"), qGet(q, "if-absent"))
     if status == 409 { res = errRes("409 Conflict", "precondition_failed", err)  return }
     if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
@@ -145,11 +195,6 @@ func authRoutes(req, q, segs) (res) {
     return
   }
 
-  // Administering identities is operator work, not user work.
-  if !authed(req, gAdmin, gHost) {
-    res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
-    return
-  }
   // Self-service: a signed-in user changes their OWN password by proving the
   // current one. An anonymous caller gets 401 rather than 403 — a credential
   // would genuinely help here.
@@ -173,6 +218,12 @@ func authRoutes(req, q, segs) (res) {
     _, uerr := updateUser(gDB, who.id, "", "", nxt, false, false)
     if uerr != "" { res = errRes("400 Bad Request", "validation_error", uerr)  return }
     res = jsonRes("200 OK", "{\"ok\":true,\"changed\":true}")
+    return
+  }
+
+  // Administering identities is operator work, not user work.
+  if !authed(req, gAdmin, gHost) {
+    res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
     return
   }
   if leaf == "users" {
@@ -656,11 +707,28 @@ func handle(req) (res) {
   if len(segs) >= 3 {
     if segs[0] == "v1" {
       if segs[1] == "store" {
-        if !authed(req, gAdmin, gHost) {
-          res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
+        // The policy is decided ONCE, here, and handed to the routes as a scope.
+        // A route that had to re-derive it could implement half of it.
+        storeAdmin := authed(req, gAdmin, gHost)
+        storeTok := bearer(req)
+        storeSub := ""
+        storeOrg := ""
+        if storeTok != "" {
+          if !storeAdmin {
+            whoJ, whoClaims, whoErr := meFromToken(gDB, storeTok)
+            if whoErr == "" {
+              storeSub = jsonField(whoJ, ".id")
+              storeOrg = jsonField(whoClaims, ".org")
+            }
+          }
+        }
+        storeAcc := accessOf(gDB, segs[2], segs[3])
+        dec := decideAccess(gDB, storeAcc, verbFor(req.method, len(segs) >= 5), storeAdmin, storeTok != "", storeSub, storeOrg)
+        if !dec.allow {
+          res = errRes(dec.status, dec.kind, dec.msg)
           return
         }
-        r, handled := storeRoutes(req, q, segs)
+        r, handled := storeRoutes(req, q, segs, dec)
         if handled { res = r  return }
       }
     }
@@ -691,6 +759,8 @@ func main() {
   if p != "" { if looksNumeric(p) { port = int(parse(p, 0)) } }
 
   gDB = storeOpen(path)
+  // A store written before policies existed gains the column on open.
+  accessMigrate(gDB)
   if gDB == 0 { println("cannot open " + path)  return }
   // The scheduler is part of the server, not a separate process: a job that
   // only fires when someone remembers to run a ticker is not a schedule.
