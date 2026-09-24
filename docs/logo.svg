@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="machin-bkn">
+  <title>machin-bkn</title>
+  <!-- bkn's mark is a letterpress type sort. This is the SAME sort cast a
+       second time from the written specification rather than from the
+       original mould: the outline is there, the body is hollow, and the
+       tick says the two print the same thing. Palette matches the docs site. -->
+  <rect x="8" y="8" width="496" height="496" rx="44" fill="#fbf6e9"/>
+  <rect x="8" y="8" width="496" height="496" rx="44" fill="none" stroke="#24221d" stroke-width="16"/>
+  <rect x="40" y="40" width="432" height="432" rx="22" fill="none" stroke="#24221d" stroke-width="4" opacity=".38"/>
+
+  <!-- the second casting: same geometry as bkn's sort, drawn rather than filled -->
+  <g>
+    <path d="M256 128 L392 200 L256 272 L120 200 Z" fill="#456b4b" opacity=".16"/>
+    <path d="M256 128 L392 200 L256 272 L120 200 Z" fill="none" stroke="#24221d" stroke-width="12" stroke-linejoin="round"/>
+    <path d="M120 200 L256 272 L256 400 L120 328 Z M392 200 L392 328 L256 400 L256 272 Z"
+          fill="none" stroke="#24221d" stroke-width="12" stroke-linejoin="round"/>
+    <!-- the nick, found by touch on the original -->
+    <path d="M150 268 L226 308" fill="none" stroke="#24221d" stroke-width="16" stroke-linecap="round" opacity=".5"/>
+  </g>
+
+  <!-- it prints the same thing -->
+  <path d="M300 338 L340 378 L424 294" fill="none" stroke="#456b4b" stroke-width="30"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>machin-bkn — the second implementation that keeps the first honest</title>
+<meta name="description" content="A clean-room reimplementation of bkn in machin (MFL), built from the published contract alone and held to bkn's own test suite. Not a product: an instrument for checking that the contract is complete.">
+<meta name="keywords" content="machin-bkn, bkn, clean room, contract, MFL, machin, sqlite, single binary, agent-first">
+<link rel="icon" type="image/svg+xml" href="logo.svg">
+<style>
+:root{--ink:#24221d;--muted:#716b5f;--paper:#fbf6e9;--card:#fffdf7;--line:#ded4be;--gold:#c88a16;--green:#456b4b;--red:#a64235}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.55 system-ui,-apple-system,sans-serif}
+.wrap{max-width:900px;margin:auto;padding:42px 22px 70px}
+header{border-bottom:2px solid var(--ink);padding-bottom:24px;margin-bottom:28px;display:flex;gap:26px;align-items:flex-start}
+.mark{flex:0 0 auto;width:104px;height:104px;margin-top:6px}
+.headtext{min-width:0}
+.eyebrow{font-size:12px;font-weight:800;letter-spacing:.15em;text-transform:uppercase;color:var(--green)}
+h1{font:700 clamp(34px,6vw,60px)/1.03 Georgia,serif;margin:8px 0 12px}
+h2{font:700 27px/1.15 Georgia,serif;margin:38px 0 15px}
+h3{margin:0 0 4px;font-size:18px}
+.lead{max-width:690px;color:var(--muted);font-size:18px}
+.notice{padding:16px 18px;border-left:5px solid var(--green);background:#eaf0e9;margin:24px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;display:flex;flex-direction:column}
+.tag{font-size:11px;font-weight:800;text-transform:uppercase;color:var(--green);letter-spacing:.08em}
+.meta{color:var(--muted);font-size:14px;margin:3px 0 14px}
+.why{flex:1;margin:0}
+.links{margin-top:13px;display:flex;gap:8px;flex-wrap:wrap}
+a.btn{color:#fff;background:var(--ink);padding:8px 11px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:700}
+a.btn.alt{background:transparent;color:var(--ink);border:1px solid var(--ink)}
+ol,ul{padding-left:22px}
+li{margin:6px 0}
+.arch{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#26251f;color:#f7efd9;border-radius:9px;padding:18px;overflow-x:auto;max-width:100%;font-size:13.5px;line-height:1.5}
+.arch b{color:var(--gold);font-weight:600}
+.arch i{color:#9a9481;font-style:normal}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:#f2e9d4;padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+.card code{background:#f4eeda}
+a{color:var(--ink)}
+.foot{margin-top:42px;border-top:1px solid var(--line);padding-top:15px;color:var(--muted);font-size:13px}
+.foot a{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--green)}
+.score{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}
+.score div{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;flex:1 1 150px}
+.score b{display:block;font:700 30px/1 Georgia,serif;color:var(--green)}
+.score span{font-size:13px;color:var(--muted)}
+@media(max-width:540px){.wrap{padding-top:26px}.arch{font-size:12px}
+header{flex-direction:column;gap:14px}.mark{width:76px;height:76px;margin-top:0}
+table{display:block;overflow-x:auto}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <img class="mark" src="logo.svg" alt="">
+  <div class="headtext">
+    <div class="eyebrow">A second implementation</div>
+    <h1>machin&#8209;bkn</h1>
+    <p class="lead">A clean-room reimplementation of <a href="https://github.com/javimosch/bkn">bkn</a>
+    in <a href="https://github.com/javimosch/machin">machin</a> (MFL), built from the published
+    contract alone and held to bkn's own test suite.</p>
+    <div class="links">
+      <a class="btn" href="https://github.com/javimosch/machin-bkn">Repository</a>
+      <a class="btn alt" href="https://github.com/javimosch/bkn">bkn, the original</a>
+      <a class="btn alt" href="https://javimosch.github.io/bkn/">bkn docs</a>
+    </div>
+  </div>
+</header>
+
+<div class="notice">
+  <strong>This is not a product, and you should not run it.</strong>
+  Run bkn. This exists to answer one question: <em>is bkn's published contract
+  complete enough that somebody could rebuild it from the contract alone?</em>
+  Anything this cannot reproduce is something that was only ever written down
+  in Go.
+</div>
+
+<div class="score">
+  <div><b>191</b><span>contract assertions from bkn's own <code>test/</code>, all passing</span></div>
+  <div><b>239</b><span>further assertions covering the CLI, which the contract suite never touches</span></div>
+  <div><b>75/83</b><span>commands; the 8 missing are deliberately out of scope</span></div>
+  <div><b>7.6&nbsp;MB</b><span>one static binary, ~6,200 lines of MFL</span></div>
+</div>
+
+<h2>The clean-room rule</h2>
+
+<p>Absolute, and the whole basis of the exercise:</p>
+
+<div class="arch">Never read <b>~/ai/bkn/**/*.go</b>, or any file under <b>~/ai/bkn/internal/</b>.</div>
+
+<p>What may be read is exactly what any other reader gets:</p>
+
+<table>
+<tr><th>Source</th><th>Why it is legitimate</th></tr>
+<tr><td><code>contract/help-json.json</code></td><td>the machine-readable command catalog — literally designed as the contract</td></tr>
+<tr><td><code>contract/guide.json</code></td><td>the embedded mental model, concepts, gotchas and examples</td></tr>
+<tr><td><code>contract/llms.txt</code></td><td>the public front door</td></tr>
+<tr><td><code>contract/spec-*.md</code></td><td>the agent-first CLI specs the tool is built to</td></tr>
+<tr><td><code>test/</code> and <code>examples/</code></td><td>the assertions and the userland scripts, both published</td></tr>
+<tr><td>the live HTTP surface</td><td>what any caller can observe</td></tr>
+</table>
+
+<h2>What the check actually found</h2>
+
+<p>A second implementation earns its keep by finding things the first one
+cannot see about itself.</p>
+
+<div class="grid">
+  <section class="card">
+    <div class="tag">About the harness</div>
+    <h3>The suites cannot run from a cold start</h3>
+    <p class="meta">Found by being the first thing other than the live instance to run them</p>
+    <p class="why">bkn's suites were written against a deployment whose fixtures had been
+    seeded by hand, so a fresh instance scores nonsense — <code>t-files</code> read
+    <strong>1/12</strong> for want of two namespaces. <code>dog.sh</code> also takes its
+    admin token from <code>$SP/admin.tok</code> rather than the environment, so a mismatch
+    turns every write into a 403 and cascades into failures that look like missing
+    features. The seed is now written down.</p>
+  </section>
+  <section class="card">
+    <div class="tag">About the port</div>
+    <h3>Six gaps only visible once fixtures existed</h3>
+    <p class="meta">Script access, <code>bkn.caller</code>, admin reset, hook content types, two query bugs</p>
+    <p class="why">Three of them were invisible until the fixtures were there, because
+    without seed data every suite failed for the wrong reason. Two were the same
+    shape and both presented as <em>"the query found nothing"</em>: a
+    <code>where</code> clause that only understood the flat string form, and a
+    <code>find()</code> that dropped its criteria entirely and answered with whatever
+    happened to be first in the collection.</p>
+  </section>
+  <section class="card">
+    <div class="tag">About machin</div>
+    <h3>Two compiler and runtime bugs</h3>
+    <p class="meta">Writing a real backend in MFL is what turns a language gap into a bug report</p>
+    <p class="why"><a href="https://github.com/javimosch/machin/issues/672">#672</a> —
+    <code>sqlite_query</code> returns <code>[]</code> for a query that <em>failed</em>,
+    indistinguishable from one that matched nothing; it silently broke three features in
+    a day. <a href="https://github.com/javimosch/machin/issues/673">#673</a> — a goroutine
+    satisfies its own unbuffered channel send, so the keeper-lock idiom (the only way to
+    write a lock when every channel is unbuffered) spins at 100% CPU.</p>
+  </section>
+  <section class="card">
+    <div class="tag">About the CLI</div>
+    <h3>Commands that worked but did not exist</h3>
+    <p class="meta">A catalog is a contract, not a courtesy</p>
+    <p class="why">Six commands were fully implemented and simply absent from
+    <code>help-json</code>. Since that catalog is how an agent discovers the surface, a
+    working-but-unlisted command does not exist for any caller — and the contract suite is
+    blind to it, because it drives HTTP. A test now checks all three directions: everything
+    listed runs, everything the guide teaches is listed, everything listed is taught.</p>
+  </section>
+</div>
+
+<h2>Build and run</h2>
+
+<p>Needs the machin compiler and <code>libssl-dev</code>. QuickJS is vendored and
+linked as a static archive, so the result is one file with no runtime dependencies.</p>
+
+<div class="arch">./build.sh cmd/serve.mfl -o bin/bkn
+
+<i># BKN_DATA names the database; BKN_ADMIN_TOKEN gates every admin route</i>
+bin/bkn serve --host 127.0.0.1 --port 7799
+bin/bkn <b>guide</b>            <i># the whole mental model, embedded in the binary</i>
+bin/bkn <b>help-json</b>        <i># the command catalog</i></div>
+
+<h2>Checking it yourself</h2>
+
+<p>Seed the fixtures first, or the score means nothing:</p>
+
+<div class="arch">./test/seed-fixtures.sh bin/bkn ~/ai/bkn/examples ~/ai/bkn/test
+echo -n "$BKN_ADMIN_TOKEN" &gt; ~/ai/bkn/test/admin.tok   <i># dog.sh reads THIS file</i>
+bin/bkn serve --host 127.0.0.1 --port 7799 &amp;
+
+cd ~/ai/bkn/test
+SP=$PWD BKN_TEST_URL=http://127.0.0.1:7799 bash t-store.sh
+
+<i># and the CLI suites, which the contract cannot reach</i>
+./test/catalog.sh bin/bkn      <i># the catalog agrees with the code and the guide</i>
+./test/auth-cli.sh bin/bkn     <i># sessions, rotation, revocation</i>
+./test/cli-surface.sh bin/bkn  <i># store, kv, events, files, locks, cron, hooks, scripts</i></div>
+
+<p><code>t-scriptaccess.sh</code> starts its own instance, because a script can only be
+created by the CLI on the machine holding the data — point it at the binary with
+<code>BKN_BIN</code>.</p>
+
+<h2>Conformance</h2>
+
+<p>Built to the <a href="https://cli-specs.intrane.fr">agent-first CLI spec family</a>.
+This is a verification instrument rather than a distributed tool, so the specs that
+exist to ship and support a <em>product</em> are deliberately out of scope.</p>
+
+<table>
+<tr><th>Spec</th><th>Status</th></tr>
+<tr><td>cli-guide-spec</td><td><strong>Yes</strong> — <code>bkn guide [--human]</code> (embedded, never fetched), <code>GET /guide</code>, <code>GET /llms.txt</code></td></tr>
+<tr><td>cli-output-spec</td><td>Partial — <code>help-json</code>, stdout = data, exit codes <code>0/80/81/85/110</code>, typed errors over HTTP; CLI errors do not yet carry <code>type</code>/<code>recoverable</code>/<code>suggestions</code></td></tr>
+<tr><td>cli-daemon-spec</td><td>Partial — <code>serve --host --port</code> (loopback default), <code>GET /_health</code>; no <code>/_shutdown</code>, no <code>daemon</code> verbs</td></tr>
+<tr><td>cli-update-spec</td><td><em>Out of scope</em> — nothing here is distributed, so there is nothing to self-update</td></tr>
+<tr><td>cli-feedback-spec</td><td><em>Out of scope</em> — feedback on the contract belongs on bkn</td></tr>
+<tr><td>cli-telemetry-spec</td><td><em>Out of scope</em> — a test instrument counting its own runs measures nothing</td></tr>
+</table>
+
+<div class="foot">
+  MIT, the same as bkn ·
+  <a href="https://github.com/javimosch/machin-bkn">github.com/javimosch/machin-bkn</a> ·
+  <a href="https://github.com/javimosch/bkn">bkn</a> ·
+  <a href="https://github.com/javimosch/machin">machin</a>
+</div>
+
+</div>
+</body>
+</html>
