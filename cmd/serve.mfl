@@ -918,8 +918,10 @@ func main() {
   // believed it was talking to the new one -- which is exactly how a green
   // suite turned into 13 mysterious failures.
   println("[serve] starting on http://" + gHost + ":" + str(port))
-  serve(port, func(req) { return handle(req) })
-  // serve() only returns when it could not bind; a bound server loops forever.
+  // serve_on, NOT serve: serve() binds INADDR_ANY, so --host was decorative
+  // and an operator who asked for 127.0.0.1 or a private address got the whole
+  // internet instead. serve_on exits on a bind failure rather than returning.
+  serve_on(gHost, port, func(req) { return handle(req) })
   println("[serve] could not bind " + gHost + ":" + str(port) + " — is another instance already running?")
   exit(75)
 }

@@ -168,7 +168,10 @@ code() { curl -s -o /dev/null -w '%{http_code}' "$1"; }
 chk "private ns is 404 unsigned"  "$(code "$B/v1/files/signed/s.txt")" "404"
 chk "a signed link opens it"      "$(code "$B$U")" "200"
 chk "and serves the bytes"        "$(curl -s "$B$U")" "secret bytes"
-chk "a tampered sig is 404"       "$(code "$B$(echo "$U" | sed 's/sig=./sig=X/')")" "404"
+# Append rather than substitute: replacing the first character is a no-op
+# whenever the signature already starts with it, which made this pass or fail
+# on the roll of a random byte.
+chk "a tampered sig is 404"       "$(code "$B$(echo "$U" | sed -E 's/sig=([^&]*)/sig=\1x/')")" "404"
 # Editing exp in the URL only proves the signature covers it. To test the
 # EXPIRY, sign a correctly-signed link with a 1s life and let it die.
 chk "editing exp breaks the sig"  "$(code "$B$(echo "$U" | sed -E 's/exp=[0-9]+/exp=1000000000/')")" "404"
@@ -179,6 +182,18 @@ chk "and is 404 once it expires"  "$(code "$B$SHORT")" "404"
 SIG=$(echo "$U" | grep -oE 'sig=[^&]+')
 chk "a sig does not open another file" "$(code "$B/v1/files/unsigned/u.txt?$SIG&exp=9999999999")" "404"
 kill $SRV 2>/dev/null
+
+# --- serve --host actually binds --------------------------------------------
+# This is a security property, not a convenience. serve() binds INADDR_ANY, so
+# calling it while accepting a --host flag gave an operator who asked for
+# loopback the entire internet instead -- found by deploying to a public VPS
+# and finding port open on its public address.
+BPORT=$((22000 + RANDOM % 9000))
+"$M" serve --host 127.0.0.1 --port $BPORT >"$WORK/bind.log" 2>&1 &
+BSRV=$!
+for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$BPORT/_health" >/dev/null && break; sleep 0.1; done
+chk "--host binds where it says" "$(ss -ltn "sport = :$BPORT" 2>/dev/null | grep -oE '127\.0\.0\.1|0\.0\.0\.0' | head -1)" "127.0.0.1"
+kill $BSRV 2>/dev/null
 
 # --- backup -----------------------------------------------------------------
 chk "backup needs a destination"  "$(rc "$M" backup)" "85"
