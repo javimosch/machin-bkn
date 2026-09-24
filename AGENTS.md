@@ -493,12 +493,21 @@ The CLI gained the read half it never had -- `version`, `help-json`,
 `store get|list|find|collections`, `files put|get|show|list`, `events
 list|stats`, `script run|runs`, and the read side of `auth`.
 
-It has since been finished: 75 of the contract's 83 commands, with the
-genuine gap at zero. The eight that remain are the ones deliberately out of
-scope for a verification instrument -- `update`, `install`, `uninstall`,
-`feedback`, `telemetry` and the three `daemon` verbs. Nothing here is
-distributed, so there is nothing to self-update and nothing whose usage would
-be worth counting.
+It has since been largely finished: 75 of the contract's 87 commands. Eight
+are deliberately out of scope for a verification instrument -- `update`,
+`install`, `uninstall`, `feedback`, `telemetry` and the three `daemon` verbs.
+Nothing here is distributed, so there is nothing to self-update and nothing
+whose usage would be worth counting.
+
+The other four are open, and how they surfaced is the more useful part. The
+gap read as **zero** against `contract/help-json.json` until that file was
+re-snapshotted from a current bkn, at which point the catalog went from 83
+commands to 87: `backup`, `files sign`, `store access` and `store count` had
+been added upstream since the last sync. Neither build was wrong. The snapshot
+was, and a score measured against a stale contract flatters itself. **Re-sync
+`contract/` before quoting a number from it** -- the whole value of a second
+implementation is that it notices drift, which it cannot do if its copy of the
+contract is assumed rather than refreshed.
 
 Two of the later additions were not exposure work and are worth naming.
 `bkn.caller` did not exist, so a script could not tell who called it; it is
