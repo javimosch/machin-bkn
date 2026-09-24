@@ -64,16 +64,19 @@ chk "--enable restores"          "$("$M" auth user update dev@dog.io --enable </
 chk "member remove"              "$("$M" auth member remove acme dev@dog.io </dev/null | j 'str(d["removed"])')" "True"
 chk "and the membership is gone" "$("$M" auth memberships dev@dog.io </dev/null | j 'str(d["count"])')" "1"
 chk "org delete"                 "$("$M" auth org delete other </dev/null | j 'str(d["deleted"])')" "True"
-chk "the org is gone"            "$(rc "$M" auth org show other)" "81"
+chk "the org is gone"            "$(rc "$M" auth org show other)" "92"
 # deleting an org must not delete its people
 chk "the user survives it"       "$(rc "$M" auth user show dev@dog.io)" "0"
 chk "user delete"                "$("$M" auth user delete dev@dog.io </dev/null | j 'str(d["deleted"])')" "True"
-chk "the user is gone"           "$(rc "$M" auth user show dev@dog.io)" "81"
+chk "the user is gone"           "$(rc "$M" auth user show dev@dog.io)" "92"
 
-chk "unknown user: update"       "$(rc "$M" auth user update ghost@x.io --name N)" "85"
-chk "unknown user: sessions"     "$(rc "$M" auth sessions ghost@x.io)" "81"
-chk "unknown user: revoke"       "$(rc "$M" auth revoke ghost@x.io)" "81"
-chk "unknown user: delete"       "$(rc "$M" auth user delete ghost@x.io)" "81"
+# not 85: updating a user who is not there is a not-found, and it used to
+# answer 85 only because the library returns a message and the CLI could not
+# tell the difference.
+chk "unknown user: update"       "$(rc "$M" auth user update ghost@x.io --name N)" "92"
+chk "unknown user: sessions"     "$(rc "$M" auth sessions ghost@x.io)" "92"
+chk "unknown user: revoke"       "$(rc "$M" auth revoke ghost@x.io)" "92"
+chk "unknown user: delete"       "$(rc "$M" auth user delete ghost@x.io)" "92"
 
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]

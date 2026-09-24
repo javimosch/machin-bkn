@@ -22,13 +22,13 @@ chk "create declares normalizers" "$("$M" store create shop/items --normalize sk
 chk "and they are applied"        "$("$M" store get shop/items a1 </dev/null | j 'd["record"]["sku"]')" "ab-9"
 chk "patch is partial"            "$("$M" store patch shop/items a1 --data '{"qty":7}' </dev/null | j 'str(d["record"]["qty"])+"/"+d["record"]["sku"]')" "7/ab-9"
 chk "delete"                      "$("$M" store delete shop/items a1 </dev/null | j 'str(d["deleted"])')" "True"
-chk "delete of a gone record"     "$(rc "$M" store delete shop/items a1)" "81"
+chk "delete of a gone record"     "$(rc "$M" store delete shop/items a1)" "92"
 chk "patch needs --data"          "$(rc "$M" store patch shop/items a1)" "85"
 
 # --- kv --------------------------------------------------------------------
 "$M" kv set tmp.k v1 >/dev/null 2>&1
 chk "kv delete"                   "$("$M" kv delete tmp.k </dev/null | j 'str(d["deleted"])')" "True"
-chk "kv delete of a gone key"     "$(rc "$M" kv delete tmp.k)" "81"
+chk "kv delete of a gone key"     "$(rc "$M" kv delete tmp.k)" "92"
 
 # --- events ----------------------------------------------------------------
 "$M" events emit probe old --subject s1 >/dev/null 2>&1
@@ -47,14 +47,14 @@ printf 'hello' > "$WORK/f.txt"
 chk "file is listed"              "$("$M" files list pics </dev/null | j 'len(d["files"])')" "1"
 chk "files delete"                "$("$M" files delete pics f.txt </dev/null | j 'str(d["deleted"])')" "True"
 chk "and it is gone"              "$("$M" files list pics </dev/null | j 'len(d["files"])')" "0"
-chk "delete of a gone file"       "$(rc "$M" files delete pics f.txt)" "81"
+chk "delete of a gone file"       "$(rc "$M" files delete pics f.txt)" "92"
 
 # --- lock ------------------------------------------------------------------
 OWNER=$("$M" lock acquire job.x --ttl 5m </dev/null | j 'd["owner"]')
 chk "acquire returns an owner"    "$([ -n "$OWNER" ] && echo yes || echo no)" "yes"
 # held-by-someone-else is an answer, not an error
 chk "a held lock refuses politely" "$("$M" lock acquire job.x </dev/null | j 'str(d["acquired"])')" "False"
-chk "the wrong owner cannot release" "$(rc "$M" lock release job.x wrongtoken)" "81"
+chk "the wrong owner cannot release" "$(rc "$M" lock release job.x wrongtoken)" "92"
 chk "the right owner can"         "$("$M" lock release job.x "$OWNER" </dev/null | j 'str(d["released"])')" "True"
 chk "release needs owner or --force" "$(rc "$M" lock release job.x)" "85"
 "$M" lock acquire job.x >/dev/null 2>&1
@@ -73,7 +73,7 @@ chk "cron update --enable"        "$("$M" cron update nightly --enable </dev/nul
 chk "cron rejects a bad schedule" "$(rc "$M" cron update nightly --schedule nope)" "85"
 chk "cron rejects bad input JSON" "$(rc "$M" cron update nightly --input 'not json')" "85"
 chk "cron update needs a field"   "$(rc "$M" cron update nightly)" "85"
-chk "cron show of an unknown job" "$(rc "$M" cron show ghost)" "81"
+chk "cron show of an unknown job" "$(rc "$M" cron show ghost)" "92"
 
 # --- hooks -----------------------------------------------------------------
 "$M" hooks create probe --script probe >/dev/null 2>&1
@@ -89,11 +89,11 @@ chk "hooks update needs a field"  "$(rc "$M" hooks update probe)" "85"
 chk "hooks test passes the method" "$("$M" hooks test probe --method PUT --body '{}' </dev/null | j 'd["value"]["saw"]')" "PUT"
 chk "hooks test passes the body"  "$("$M" hooks test probe --body 'raw-body' </dev/null | j 'd["value"]["body"]')" "raw-body"
 chk "hooks test passes headers"   "$("$M" hooks test probe --header 'X-Token=abc' --body '{}' </dev/null | j 'd["value"]["hdr"]')" "abc"
-chk "hooks test of an unknown hook" "$(rc "$M" hooks test ghost)" "81"
+chk "hooks test of an unknown hook" "$(rc "$M" hooks test ghost)" "92"
 
 # --- script ----------------------------------------------------------------
 chk "script show"                 "$("$M" script show probe </dev/null | j 'd["script"]["name"]+"/"+d["script"]["run_access"]')" "probe/admin"
-chk "script show of an unknown"   "$(rc "$M" script show ghost)" "81"
+chk "script show of an unknown"   "$(rc "$M" script show ghost)" "92"
 echo 'function main(i){ return { doubled: (i.n||0)*2 }; }' > "$WORK/u.js"
 chk "script test runs uninstalled" "$("$M" script test --file "$WORK/u.js" --input '{"n":21}' </dev/null | j 'str(d["value"]["doubled"])')" "42"
 # a test must not install, and must not litter the run history
@@ -155,8 +155,8 @@ chk "ns reports signed_urls"      "$("$M" files ns list </dev/null | j 'str(next
 chk "the signing key is not echoed" "$("$M" files ns list </dev/null | grep -c signing_key)" "0"
 chk "sign returns a url"          "$("$M" files sign signed s.txt --ttl 10m </dev/null | j '"sig=" in d["url"] and "exp=" in d["url"]')" "True"
 chk "--base-url prefixes it"      "$("$M" files sign signed s.txt --base-url https://cdn.example.com </dev/null | j 'd["url"].startswith("https://cdn.example.com/v1/files/")')" "True"
-chk "a ns with no key refuses"    "$(rc "$M" files sign unsigned u.txt)" "81"
-chk "signing a missing file"      "$(rc "$M" files sign signed nope.txt)" "81"
+chk "a ns with no key refuses"    "$(rc "$M" files sign unsigned u.txt)" "92"
+chk "signing a missing file"      "$(rc "$M" files sign signed nope.txt)" "92"
 
 PORT=$((21000 + RANDOM % 9000))
 "$M" serve --host 127.0.0.1 --port $PORT >"$WORK/srv.log" 2>&1 &
@@ -209,6 +209,42 @@ BEFORE=$(ls /tmp/bkn-backup-*.db 2>/dev/null | wc -l)
 chk "--stdout streams the bytes"  "$(head -c 15 "$WORK/piped.db")" "SQLite format 3"
 chk "and that stream is a real db" "$(BKN_DATA=$WORK/piped.db "$M" store count shop/items </dev/null | j 'str(d["total"])')" "3"
 chk "no temp file left behind"    "$(( $(ls /tmp/bkn-backup-*.db 2>/dev/null | wc -l) - BEFORE ))" "0"
+
+# --- the output contract -----------------------------------------------------
+# spec-output.md: "The exit code MUST match the error.code field in the typed
+# error body." An agent reads one and branches on the other, so a disagreement
+# is a lie about what happened. Checked across every error class the CLI can
+# produce, rather than spot-checked.
+typed() { # typed <label> <expected type> <cmd...>
+  local label="$1" want="$2"; shift 2
+  local out rc got code
+  out=$("$@" </dev/null 2>&1); rc=$?
+  got=$(echo "$out" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["error"]["type"])
+except Exception: print("NOT_TYPED")' 2>/dev/null)
+  code=$(echo "$out" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["error"]["code"])
+except Exception: print("none")' 2>/dev/null)
+  chk "$label" "$got/$code" "$want/$rc"
+}
+"$M" store create out/put >/dev/null 2>&1
+typed "unknown command is typed"   unknown_command   "$M" nosuchverb
+typed "a missing record"           not_found         "$M" store get out/put ghostid
+typed "a missing user"             not_found         "$M" auth user show ghost@x.io
+typed "a missing key"              not_found         "$M" kv delete nosuchkey
+typed "a missing job"              not_found         "$M" cron show ghost
+typed "a missing script"           not_found         "$M" script show ghost
+typed "a missing hook"             not_found         "$M" hooks show ghost
+"$M" auth user create dup@dog.io --password dup-user-pw-1 >/dev/null 2>&1
+typed "a duplicate user"           already_exists    "$M" auth user create dup@dog.io --password dup-user-pw-1
+typed "a bad group-by"             validation_error  "$M" store count out/put --by 'no such'
+typed "a missing destination"      validation_error  "$M" backup
+# suggestions SHOULD name the command that fixes the problem
+chk "unknown command suggests a cure" "$("$M" nosuchverb </dev/null 2>&1 | j '",".join(d["error"]["suggestions"])')" "bkn help-json,bkn guide"
+chk "errors say if a retry helps"     "$("$M" nosuchverb </dev/null 2>&1 | j 'str(d["error"]["recoverable"])')" "False"
+# the catalog must describe the codes the tool actually emits
+chk "help-json catalogues 92"         "$("$M" help-json </dev/null | j 'str("92" in d["exit_codes"])')" "True"
+chk "and no longer claims 81"         "$("$M" help-json </dev/null | j 'str("81" in d["exit_codes"])')" "False"
 
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]

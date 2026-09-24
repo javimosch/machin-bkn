@@ -152,7 +152,7 @@ that exist to ship and support a *product* are deliberately out of scope.
 
 | Spec | Status |
 |---|---|
-| cli-output-spec | partial — `help-json`, stdout = data, exit codes `0/80/81/85/110`, typed errors over HTTP; CLI errors do not yet carry `type`/`recoverable`/`suggestions` |
+| cli-output-spec | **yes** — stdout = data, `help-json`, a `version` on every success, and typed errors whose `code` equals the exit code (`80/85/92/95/110`) with `type`, `recoverable` and suggestions |
 | cli-guide-spec | **yes** — `bkn guide [--human]` (embedded, never fetched), `GET /guide`, `GET /llms.txt` |
 | cli-daemon-spec | partial — `serve --host --port` (loopback default), `GET /_health`; no `/_shutdown`, no `daemon start\|stop\|status` |
 | cli-update-spec | **out of scope** — nothing here is distributed, so there is nothing to self-update |

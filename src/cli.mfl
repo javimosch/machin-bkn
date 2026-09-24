@@ -29,8 +29,8 @@ func runCLI(a) (code) {
           i = i + 1
         }
         user, err := createUser(db, a[4], password, name, role)
-        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-        println("{\"ok\":true,\"user\":" + user + "}")
+        if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+        emit("{\"ok\":true,\"user\":" + user + "}")
         return
       }
     }
@@ -43,8 +43,8 @@ func runCLI(a) (code) {
           i = i + 1
         }
         org, err := createOrg(db, a[4], name)
-        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-        println("{\"ok\":true,\"org\":" + org + "}")
+        if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+        emit("{\"ok\":true,\"org\":" + org + "}")
         return
       }
     }
@@ -57,8 +57,8 @@ func runCLI(a) (code) {
           i = i + 1
         }
         err := addMember(db, a[4], a[5], role)
-        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-        println("{\"ok\":true,\"membership\":{\"org\":" + jsonQuote(a[4]) + ",\"user\":" + jsonQuote(a[5]) + ",\"role\":" + jsonQuote(role) + "}}")
+        if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+        emit("{\"ok\":true,\"membership\":{\"org\":" + jsonQuote(a[4]) + ",\"user\":" + jsonQuote(a[5]) + ",\"role\":" + jsonQuote(role) + "}}")
         return
       }
     }
@@ -89,19 +89,19 @@ func runCLI(a) (code) {
           i = i + 1
         }
         out, err := createNs(db, a[4], backend, maxBytes, join(allow, ","), public, signingKey)
-        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-        println("{\"ok\":true,\"namespace\":" + out + "}")
+        if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+        emit("{\"ok\":true,\"namespace\":" + out + "}")
         return
       }
       if a[3] == "list" {
         nss := listNs(db)
-        println("{\"ok\":true,\"count\":" + str(countArray(db, nss)) + ",\"namespaces\":" + nss + "}")
+        emit("{\"ok\":true,\"count\":" + str(countArray(db, nss)) + ",\"namespaces\":" + nss + "}")
         return
       }
       if a[3] == "delete" {
         err := deleteNs(db, a[4])
-        if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-        println("{\"ok\":true,\"deleted\":true}")
+        if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+        emit("{\"ok\":true,\"deleted\":true}")
         return
       }
     }
@@ -120,29 +120,29 @@ func runCLI(a) (code) {
         i = i + 1
       }
       out, err := createJob(db, a[3], schedule, script, input)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"job\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"job\":" + out + "}")
       return
     }
     if a[2] == "list" {
       jobs, count := listJobs(db)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"jobs\":" + jobs + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"jobs\":" + jobs + "}")
       return
     }
     if a[2] == "run" {
       out, err := runJob(db, a[3])
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"result\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"result\":" + out + "}")
       return
     }
     if a[2] == "tick" {
-      println("{\"ok\":true,\"fired\":" + str(tickCron(db)) + "}")
+      emit("{\"ok\":true,\"fired\":" + str(tickCron(db)) + "}")
       return
     }
     if a[2] == "delete" {
       err := deleteJob(db, a[3])
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"deleted\":true}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"deleted\":true}")
       return
     }
   }
@@ -162,13 +162,13 @@ func runCLI(a) (code) {
         i = i + 1
       }
       out, err := emitEvent(db, a[3], a[4], level, source, subject, data)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"event\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"event\":" + out + "}")
       return
     }
     if a[2] == "streams" {
       streams, count := listStreams(db)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"streams\":" + streams + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"streams\":" + streams + "}")
       return
     }
   }
@@ -194,13 +194,13 @@ func runCLI(a) (code) {
         i = i + 1
       }
       out, err := createScript(db, a[3], source, description, timeout, allowNet, runAccess)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"script\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"script\":" + out + "}")
       return
     }
     if a[2] == "list" {
       scripts, count := listScripts(db)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"scripts\":" + scripts + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"scripts\":" + scripts + "}")
       return
     }
     if a[2] == "update" {
@@ -210,16 +210,16 @@ func runCLI(a) (code) {
         if a[i] == "--run-access" { if i+1 < len(a) { runAccess = a[i+1] } }
         i = i + 1
       }
-      if runAccess == "" { println(cliErr("script update needs --run-access admin|user|public"))  code = 85  return }
+      if runAccess == "" { println(cliErr(85, "validation_error", "script update needs --run-access admin|user|public"))  code = 85  return }
       out, err := updateScriptAccess(db, a[3], runAccess)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"script\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"script\":" + out + "}")
       return
     }
     if a[2] == "delete" {
       err := deleteScript(db, a[3])
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"deleted\":true}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"deleted\":true}")
       return
     }
   }
@@ -239,19 +239,19 @@ func runCLI(a) (code) {
         i = i + 1
       }
       out, err := createHook(db, a[3], script, maxBytes, join(origins, ","), rate)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"hook\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"hook\":" + out + "}")
       return
     }
     if a[2] == "list" {
       hooks, count := listHooks(db)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"hooks\":" + hooks + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"hooks\":" + hooks + "}")
       return
     }
     if a[2] == "delete" {
       err := deleteHook(db, a[3])
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"deleted\":true}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"deleted\":true}")
       return
     }
   }
@@ -266,7 +266,7 @@ func runCLI(a) (code) {
       i = i + 1
     }
     if to == "" && !toStdout {
-      println(cliErr("say where the snapshot goes"))
+      println(cliErr(85, "validation_error", "say where the snapshot goes"))
       code = 85
       return
     }
@@ -275,21 +275,21 @@ func runCLI(a) (code) {
       // half-written stream is worse than a refusal.
       tmp := "/tmp/bkn-backup-" + str(now_ms()) + ".db"
       _, bErr := backupTo(db, tmp)
-      if bErr != "" { println(cliErr(bErr))  code = 85  return }
+      if bErr != "" { println(cliErrAuto(bErr))  code = cliCodeAuto(bErr)  return }
       // NUL-safe, and it survives both a redirect and a pipe.
       write_file_bytes("/dev/stdout", read_file_bytes(tmp))
       remove(tmp)
       return
     }
     out, bErr := backupTo(db, to)
-    if bErr != "" { println(cliErr(bErr))  code = 85  return }
-    println(out)
+    if bErr != "" { println(cliErrAuto(bErr))  code = cliCodeAuto(bErr)  return }
+    emit(out)
     return
   }
 
   if a[1] == "lock" {
     if a[2] == "list" {
-      println("{\"ok\":true,\"locks\":" + listLocks(db) + "}")
+      emit("{\"ok\":true,\"locks\":" + listLocks(db) + "}")
       return
     }
   }
@@ -307,19 +307,19 @@ func runCLI(a) (code) {
         i = i + 1
       }
       out, err := kvSet(db, a[3], a[4], kind, description, public)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"entry\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"entry\":" + out + "}")
       return
     }
     if a[2] == "get" {
       entry, found, err := kvGet(db, a[3])
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      if !found { println("{\"ok\":false,\"error\":{\"message\":\"key not found\"}}")  code = 84  return }
-      println("{\"ok\":true,\"entry\":" + entry + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      if !found { println(cliErr(92, "not_found", "key not found"))  code = 92  return }
+      emit("{\"ok\":true,\"entry\":" + entry + "}")
       return
     }
     if a[2] == "list" {
-      println("{\"ok\":true,\"entries\":" + kvList(db, "", false) + "}")
+      emit("{\"ok\":true,\"entries\":" + kvList(db, "", false) + "}")
       return
     }
   }
@@ -341,10 +341,10 @@ func runCLI(a) (code) {
         i = i + 1
       }
       ns, coll, refErr := splitRef(ref)
-      if refErr != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(refErr) + "}}")  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       out, err := putDoc(db, ns, coll, explicit, data)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "}}")  code = 85  return }
-      println("{\"ok\":true,\"record\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"record\":" + out + "}")
       return
     }
   }
@@ -364,31 +364,31 @@ func runCLI(a) (code) {
       if a[gi] == "--human" { human = true }
       gi = gi + 1
     }
-    if human { println(guideMarkdown(db)) } else { println(guideJSON()) }
+    if human { println(guideMarkdown(db)) } else { emit(guideJSON()) }
     return
   }
   if a[1] == "version" {
-    println("{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":" + jsonQuote(toolVersion()) + ",\"version\":\"1.0\"}")
+    emit("{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":" + jsonQuote(toolVersion()) + ",\"version\":\"1.0\"}")
     return
   }
 
   if a[1] == "help-json" {
-    println(helpJSON())
+    emit(helpJSON())
     return
   }
 
   if a[1] == "store" {
     if a[2] == "get" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       rec, found := getDoc(db, ns, coll, a[4])
-      if !found { println(cliErr("record not found"))  code = 81  return }
-      println("{\"ok\":true,\"record\":" + rec + "}")
+      if !found { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
+      emit("{\"ok\":true,\"record\":" + rec + "}")
       return
     }
     if a[2] == "list" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       limit := 50
       offset := 0
       order := ""
@@ -416,12 +416,12 @@ func runCLI(a) (code) {
       desc := dir == "desc"
       records := listJSON(db, ns, coll, filters, order, desc, limit, offset)
       total := countDocs(db, ns, coll, filters)
-      println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"count\":" + str(countArray(db, records)) + ",\"total\":" + str(total) + ",\"records\":" + records + "}")
+      emit("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"count\":" + str(countArray(db, records)) + ",\"total\":" + str(total) + ",\"records\":" + records + "}")
       return
     }
     if a[2] == "find" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       filters := []Filter{}
       i := 4
       while i < len(a) {
@@ -429,8 +429,8 @@ func runCLI(a) (code) {
         i = i + 1
       }
       rec, found := findDoc(db, ns, coll, filters)
-      if !found { println(cliErr("record not found"))  code = 81  return }
-      println("{\"ok\":true,\"record\":" + rec + "}")
+      if !found { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
+      emit("{\"ok\":true,\"record\":" + rec + "}")
       return
     }
     if a[2] == "collections" {
@@ -440,7 +440,7 @@ func runCLI(a) (code) {
         if a[i] == "--ns" { if i+1 < len(a) { nsFilter = a[i+1] } }
         i = i + 1
       }
-      println("{\"ok\":true,\"collections\":" + listCollections(db, nsFilter) + "}")
+      emit("{\"ok\":true,\"collections\":" + listCollections(db, nsFilter) + "}")
       return
     }
   }
@@ -448,13 +448,13 @@ func runCLI(a) (code) {
   if a[1] == "files" {
     if a[2] == "list" {
       body, count := listFiles(db, a[3], 100, 0)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"files\":" + body + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"files\":" + body + "}")
       return
     }
     if a[2] == "show" {
       f, found := findFile(db, a[3], a[4])
-      if !found { println(cliErr("file not found"))  code = 81  return }
-      println("{\"ok\":true,\"file\":" + fileJSON(f) + "}")
+      if !found { println(cliErr(92, "not_found", "file not found"))  code = 92  return }
+      emit("{\"ok\":true,\"file\":" + fileJSON(f) + "}")
       return
     }
     if a[2] == "put" {
@@ -471,13 +471,13 @@ func runCLI(a) (code) {
       // string elsewhere in runCLI.
       fileBytes := read_file_bytes(a[4])
       out, err, _ := putFile(db, a[3], name, fileBytes, ctype, "{}")
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"file\":" + out + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"file\":" + out + "}")
       return
     }
     if a[2] == "get" {
       f, found := findFile(db, a[3], a[4])
-      if !found { println(cliErr("file not found"))  code = 81  return }
+      if !found { println(cliErr(92, "not_found", "file not found"))  code = 92  return }
       dest := ""
       i := 5
       while i < len(a) {
@@ -487,7 +487,7 @@ func runCLI(a) (code) {
       getBytes := readBlob(f.sha256)
       if dest == "" { dest = f.name }
       write_file_bytes(dest, getBytes)
-      println("{\"ok\":true,\"file\":" + fileJSON(f) + ",\"written\":" + jsonQuote(dest) + "}")
+      emit("{\"ok\":true,\"file\":" + fileJSON(f) + ",\"written\":" + jsonQuote(dest) + "}")
       return
     }
   }
@@ -505,8 +505,8 @@ func runCLI(a) (code) {
         i = i + 1
       }
       body, count, err := listEvents(db, a[3], "", level, "", "", since, "", limit, 0)
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"events\":" + body + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"events\":" + body + "}")
       return
     }
     if a[2] == "stats" {
@@ -519,8 +519,8 @@ func runCLI(a) (code) {
         i = i + 1
       }
       body, total, err := eventStats(db, a[3], by, since)
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"total\":" + str(total) + ",\"stats\":" + body + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"total\":" + str(total) + ",\"stats\":" + body + "}")
       return
     }
   }
@@ -539,8 +539,8 @@ func runCLI(a) (code) {
         i = i + 1
       }
       value, err := runScript(db, a[3], input)
-      if err != "" { println("{\"ok\":false,\"error\":{\"message\":" + jsonQuote(err) + "},\"status\":\"error\"}")  code = 85  return }
-      println("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
+      if err != "" { println(cliErr(110, "script_failed", err))  code = 110  return }
+      emit("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
       return
     }
     if a[2] == "runs" {
@@ -551,7 +551,7 @@ func runCLI(a) (code) {
         i = i + 1
       }
       body, count := listRuns(db, a[3], limit)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"runs\":" + body + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"runs\":" + body + "}")
       return
     }
   }
@@ -560,30 +560,30 @@ func runCLI(a) (code) {
     if a[2] == "user" {
       if a[3] == "list" {
         body, total := listUsers(db, 50, 0)
-        println("{\"ok\":true,\"total\":" + str(total) + ",\"users\":" + body + "}")
+        emit("{\"ok\":true,\"total\":" + str(total) + ",\"users\":" + body + "}")
         return
       }
       if a[3] == "show" {
         u, found := findUser(db, a[4])
-        if !found { println(cliErr("user not found"))  code = 81  return }
-        println("{\"ok\":true,\"user\":" + userJSON(u) + "}")
+        if !found { println(cliErr(92, "not_found", "user not found"))  code = 92  return }
+        emit("{\"ok\":true,\"user\":" + userJSON(u) + "}")
         return
       }
     }
     if a[2] == "org" {
-      if a[3] == "list" { println("{\"ok\":true,\"orgs\":" + listOrgs(db) + "}")  return }
+      if a[3] == "list" { emit("{\"ok\":true,\"orgs\":" + listOrgs(db) + "}")  return }
       if a[3] == "show" {
         o, found := findOrg(db, a[4])
-        if !found { println(cliErr("organization not found"))  code = 81  return }
-        println("{\"ok\":true,\"org\":{\"id\":" + jsonQuote(o.id) + ",\"slug\":" + jsonQuote(o.slug) + ",\"name\":" + jsonQuote(o.name) + ",\"created_at\":" + jsonQuote(o.created_at) + "}}")
+        if !found { println(cliErr(92, "not_found", "organization not found"))  code = 92  return }
+        emit("{\"ok\":true,\"org\":{\"id\":" + jsonQuote(o.id) + ",\"slug\":" + jsonQuote(o.slug) + ",\"name\":" + jsonQuote(o.name) + ",\"created_at\":" + jsonQuote(o.created_at) + "}}")
         return
       }
     }
     if a[2] == "member" {
       if a[3] == "list" {
         body, err := listMembers(db, a[4])
-        if err != "" { println(cliErr(err))  code = 81  return }
-        println("{\"ok\":true,\"members\":" + body + "}")
+        if err != "" { println(cliErr(92, "not_found", err))  code = 92  return }
+        emit("{\"ok\":true,\"members\":" + body + "}")
         return
       }
     }
@@ -605,36 +605,36 @@ func runCLI(a) (code) {
           i = i + 1
         }
         if name == "" && role == "" && password == "" && !setDisabled {
-          println(cliErr("pass at least one of --name, --role, --password[-stdin], --enable or --disable"))
+          println(cliErr(85, "validation_error", "pass at least one of --name, --role, --password[-stdin], --enable or --disable"))
           code = 85
           return
         }
         updated, uErr, revoked := updateUser(db, a[4], name, role, password, disabled, setDisabled)
-        if uErr != "" { println(cliErr(uErr))  code = 85  return }
+        if uErr != "" { println(cliErrAuto(uErr))  code = cliCodeAuto(uErr)  return }
         rv := "false"
         if revoked { rv = "true" }
-        println("{\"ok\":true,\"user\":" + userJSON(updated) + ",\"sessions_revoked\":" + rv + "}")
+        emit("{\"ok\":true,\"user\":" + userJSON(updated) + ",\"sessions_revoked\":" + rv + "}")
         return
       }
       if a[3] == "delete" {
-        if !deleteUser(db, a[4]) { println(cliErr("user not found"))  code = 81  return }
-        println("{\"ok\":true,\"deleted\":true}")
+        if !deleteUser(db, a[4]) { println(cliErr(92, "not_found", "user not found"))  code = 92  return }
+        emit("{\"ok\":true,\"deleted\":true}")
         return
       }
     }
     if a[2] == "org" {
       if a[3] == "delete" {
-        if !deleteOrg(db, a[4]) { println(cliErr("organization not found"))  code = 81  return }
-        println("{\"ok\":true,\"deleted\":true}")
+        if !deleteOrg(db, a[4]) { println(cliErr(92, "not_found", "organization not found"))  code = 92  return }
+        emit("{\"ok\":true,\"deleted\":true}")
         return
       }
     }
     if a[2] == "member" {
       if a[3] == "remove" {
         ok, err := removeMember(db, a[4], a[5])
-        if err != "" { println(cliErr(err))  code = 81  return }
-        if !ok { println(cliErr("membership not found"))  code = 81  return }
-        println("{\"ok\":true,\"removed\":true}")
+        if err != "" { println(cliErr(92, "not_found", err))  code = 92  return }
+        if !ok { println(cliErr(92, "not_found", "membership not found"))  code = 92  return }
+        emit("{\"ok\":true,\"removed\":true}")
         return
       }
     }
@@ -653,66 +653,66 @@ func runCLI(a) (code) {
         i = i + 1
       }
       tokens, err := login(db, a[3], password, org)
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"tokens\":" + tokens + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"tokens\":" + tokens + "}")
       return
     }
     if a[2] == "refresh" {
       // useSessionOrg: a plain refresh keeps the org the session already had,
       // so refreshing never silently changes which tenant you are in.
       tokens, err := refreshTokens(db, a[3], "", true)
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"tokens\":" + tokens + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"tokens\":" + tokens + "}")
       return
     }
     if a[2] == "switch-org" {
       tokens, err := refreshTokens(db, a[3], a[4], false)
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"tokens\":" + tokens + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"tokens\":" + tokens + "}")
       return
     }
     if a[2] == "logout" {
       // Revoking an unknown or already-dead token is a success: the caller's
       // goal is that it stops working, and it has.
       logout(db, a[3])
-      println("{\"ok\":true,\"logged_out\":true}")
+      emit("{\"ok\":true,\"logged_out\":true}")
       return
     }
     if a[2] == "me" {
       user, claims, err := meFromToken(db, a[3])
-      if err != "" { println(cliErr(err))  code = 85  return }
-      println("{\"ok\":true,\"user\":" + user + ",\"org\":" + jsonQuote(jsonField(claims, ".org")) + "}")
+      if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
+      emit("{\"ok\":true,\"user\":" + user + ",\"org\":" + jsonQuote(jsonField(claims, ".org")) + "}")
       return
     }
     if a[2] == "sessions" {
       body, count, err := sessionsOf(db, a[3])
-      if err != "" { println(cliErr(err))  code = 81  return }
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"sessions\":" + body + "}")
+      if err != "" { println(cliErr(92, "not_found", err))  code = 92  return }
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"sessions\":" + body + "}")
       return
     }
     if a[2] == "revoke" {
       n, err := revokeUserSessions(db, a[3])
-      if err != "" { println(cliErr(err))  code = 81  return }
-      println("{\"ok\":true,\"revoked\":" + str(n) + "}")
+      if err != "" { println(cliErr(92, "not_found", err))  code = 92  return }
+      emit("{\"ok\":true,\"revoked\":" + str(n) + "}")
       return
     }
     if a[2] == "memberships" {
       u, found := findUser(db, a[3])
-      if !found { println(cliErr("user not found"))  code = 81  return }
+      if !found { println(cliErr(92, "not_found", "user not found"))  code = 92  return }
       body, count := membershipsOf(db, u.id)
-      println("{\"ok\":true,\"count\":" + str(count) + ",\"memberships\":" + body + "}")
+      emit("{\"ok\":true,\"count\":" + str(count) + ",\"memberships\":" + body + "}")
       return
     }
     if a[2] == "can" {
       u, uFound := findUser(db, a[3])
-      if !uFound { println(cliErr("user not found"))  code = 81  return }
+      if !uFound { println(cliErr(92, "not_found", "user not found"))  code = 92  return }
       o, oFound := findOrg(db, a[4])
-      if !oFound { println(cliErr("organization not found"))  code = 81  return }
+      if !oFound { println(cliErr(92, "not_found", "organization not found"))  code = 92  return }
       have, haveFound := membershipRole(db, o.id, u.id)
       allowed := false
       if haveFound { allowed = roleAtLeast(have, a[5]) }
-      if allowed { println("{\"ok\":true,\"allowed\":true}")  return }
-      println("{\"ok\":true,\"allowed\":false}")
+      if allowed { emit("{\"ok\":true,\"allowed\":true}")  return }
+      emit("{\"ok\":true,\"allowed\":false}")
       return
     }
   }
@@ -720,7 +720,7 @@ func runCLI(a) (code) {
   if a[1] == "store" {
     if a[2] == "create" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       rules := []string{}
       i := 4
       while i < len(a) {
@@ -737,19 +737,19 @@ func runCLI(a) (code) {
       }
       ensureCollection(db, ns, coll)
       if len(rules) > 0 { setNormalizers(db, ns, coll, "{" + join(rules, ",") + "}") }
-      println("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(ns + "/" + coll) + ",\"normalize\":" + normalizersOf(db, ns, coll) + "}}")
+      emit("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(ns + "/" + coll) + ",\"normalize\":" + normalizersOf(db, ns, coll) + "}}")
       return
     }
     if a[2] == "delete" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
-      if !deleteDoc(db, ns, coll, a[4]) { println(cliErr("record not found"))  code = 81  return }
-      println("{\"ok\":true,\"deleted\":true}")
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
+      if !deleteDoc(db, ns, coll, a[4]) { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
+      emit("{\"ok\":true,\"deleted\":true}")
       return
     }
     if a[2] == "count" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       filters := []Filter{}
       by := ""
       byLimit := 0
@@ -764,16 +764,16 @@ func runCLI(a) (code) {
         // One bucket per distinct value, largest first, with `groups` and
         // `truncated` alongside so a --limit cannot hide that there was more.
         fields, rStatus := rollupParts(db, ns, coll, filters, by, byLimit)
-        if rStatus != 0 { println(cliErr("cannot group by " + by))  code = 85  return }
-        println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"by\":" + jsonQuote(by) + "," + fields + "}")
+        if rStatus != 0 { println(cliErr(85, "validation_error", "cannot group by " + by))  code = 85  return }
+        emit("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"by\":" + jsonQuote(by) + "," + fields + "}")
         return
       }
-      println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"total\":" + str(countDocs(db, ns, coll, filters)) + "}")
+      emit("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"total\":" + str(countDocs(db, ns, coll, filters)) + "}")
       return
     }
     if a[2] == "access" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       rules := []string{}
       ownerField := ""
       orgField := ""
@@ -799,14 +799,14 @@ func runCLI(a) (code) {
       if clear {
         // Back to undeclared, which is admin-only -- the safe direction.
         setAccess(db, ns, coll, "")
-        println("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(a[3]) + ",\"normalize\":" + normalizersOf(db, ns, coll) + "}}")
+        emit("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(a[3]) + ",\"normalize\":" + normalizersOf(db, ns, coll) + "}}")
         return
       }
       if !touched {
         // No flags is a read, not a no-op.
         acc := accessOf(db, ns, coll)
         if acc == "" { acc = "{}" }
-        println("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"access\":" + acc + ",\"rules\":" + jsonQuote(ruleSummary(acc)) + "}")
+        emit("{\"ok\":true,\"collection\":" + jsonQuote(a[3]) + ",\"access\":" + acc + ",\"rules\":" + jsonQuote(ruleSummary(acc)) + "}")
         return
       }
       parts := []string{}
@@ -815,15 +815,15 @@ func runCLI(a) (code) {
       parts = append(parts, "\"rules\":{" + join(rules, ",") + "}")
       acc := "{" + join(parts, ",") + "}"
       vErr := validateAccess(db, acc)
-      if vErr != "" { println(cliErr(vErr))  code = 85  return }
+      if vErr != "" { println(cliErrAuto(vErr))  code = cliCodeAuto(vErr)  return }
       ensureCollection(db, ns, coll)
       setAccess(db, ns, coll, acc)
-      println("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(a[3]) + ",\"normalize\":" + normalizersOf(db, ns, coll) + ",\"access\":" + accessOf(db, ns, coll) + "}}")
+      emit("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(a[3]) + ",\"normalize\":" + normalizersOf(db, ns, coll) + ",\"access\":" + accessOf(db, ns, coll) + "}}")
       return
     }
     if a[2] == "patch" {
       ns, coll, refErr := splitRef(a[3])
-      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
       patch := ""
       i := 5
       while i < len(a) {
@@ -834,19 +834,19 @@ func runCLI(a) (code) {
         }
         i = i + 1
       }
-      if patch == "" { println(cliErr("patch needs --data <json|@file|->"))  code = 85  return }
+      if patch == "" { println(cliErr(85, "validation_error", "patch needs --data <json|@file|->"))  code = 85  return }
       rec, found, pErr, _ := patchDocIf(db, ns, coll, a[4], patch, "", "")
-      if pErr != "" { println(cliErr(pErr))  code = 85  return }
-      if !found { println(cliErr("record not found"))  code = 81  return }
-      println("{\"ok\":true,\"record\":" + rec + "}")
+      if pErr != "" { println(cliErrAuto(pErr))  code = cliCodeAuto(pErr)  return }
+      if !found { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
+      emit("{\"ok\":true,\"record\":" + rec + "}")
       return
     }
   }
 
   if a[1] == "kv" {
     if a[2] == "delete" {
-      if !kvDelete(db, a[3]) { println(cliErr("key not found"))  code = 81  return }
-      println("{\"ok\":true,\"deleted\":true}")
+      if !kvDelete(db, a[3]) { println(cliErr(92, "not_found", "key not found"))  code = 92  return }
+      emit("{\"ok\":true,\"deleted\":true}")
       return
     }
     if a[2] == "rekey" {
@@ -873,8 +873,8 @@ func runCLI(a) (code) {
         i = i + 1
       }
       removed, pErr := pruneEvents(db, olderThan, stream)
-      if pErr != "" { println(cliErr(pErr))  code = 85  return }
-      println("{\"ok\":true,\"removed\":" + str(removed) + "}")
+      if pErr != "" { println(cliErrAuto(pErr))  code = cliCodeAuto(pErr)  return }
+      emit("{\"ok\":true,\"removed\":" + str(removed) + "}")
       return
     }
   }
@@ -890,14 +890,14 @@ func runCLI(a) (code) {
         i = i + 1
       }
       path, sErr := signFile(db, a[3], a[4], ttl)
-      if sErr != "" { println(cliErr(sErr))  code = 81  return }
-      println("{\"ok\":true,\"url\":" + jsonQuote(baseURL + path) + ",\"expires_in\":" + jsonQuote(str(ttl) + "s") + "}")
+      if sErr != "" { println(cliErr(92, "not_found", sErr))  code = 92  return }
+      emit("{\"ok\":true,\"url\":" + jsonQuote(baseURL + path) + ",\"expires_in\":" + jsonQuote(str(ttl) + "s") + "}")
       return
     }
     if a[2] == "delete" {
       dErr := deleteFile(db, a[3], a[4])
-      if dErr != "" { println(cliErr(dErr))  code = 81  return }
-      println("{\"ok\":true,\"deleted\":true}")
+      if dErr != "" { println(cliErr(92, "not_found", dErr))  code = 92  return }
+      emit("{\"ok\":true,\"deleted\":true}")
       return
     }
   }
@@ -913,8 +913,8 @@ func runCLI(a) (code) {
       owner, ok := acquireLock(db, a[3], ttl)
       // Held by someone else is an ordinary answer, not an error: the caller
       // asked whether it could have the lock and the answer is no.
-      if !ok { println("{\"ok\":true,\"acquired\":false}")  return }
-      println("{\"ok\":true,\"acquired\":true,\"owner\":" + jsonQuote(owner) + ",\"ttl\":" + str(ttl) + "}")
+      if !ok { emit("{\"ok\":true,\"acquired\":false}")  return }
+      emit("{\"ok\":true,\"acquired\":true,\"owner\":" + jsonQuote(owner) + ",\"ttl\":" + str(ttl) + "}")
       return
     }
     if a[2] == "release" {
@@ -929,13 +929,13 @@ func runCLI(a) (code) {
       if force {
         // --force exists for the case the owner token was lost. It is the
         // only way to break a live lease, so it must be asked for explicitly.
-        if !forceReleaseLock(db, a[3]) { println(cliErr("lock not found"))  code = 81  return }
-        println("{\"ok\":true,\"released\":true,\"forced\":true}")
+        if !forceReleaseLock(db, a[3]) { println(cliErr(92, "not_found", "lock not found"))  code = 92  return }
+        emit("{\"ok\":true,\"released\":true,\"forced\":true}")
         return
       }
-      if owner == "" { println(cliErr("release needs the owner token, or --force"))  code = 85  return }
-      if !releaseLock(db, a[3], owner) { println(cliErr("lock not found, or the owner token does not match"))  code = 81  return }
-      println("{\"ok\":true,\"released\":true}")
+      if owner == "" { println(cliErr(85, "validation_error", "release needs the owner token, or --force"))  code = 85  return }
+      if !releaseLock(db, a[3], owner) { println(cliErr(92, "not_found", "lock not found, or the owner token does not match"))  code = 92  return }
+      emit("{\"ok\":true,\"released\":true}")
       return
     }
   }
@@ -943,8 +943,8 @@ func runCLI(a) (code) {
   if a[1] == "cron" {
     if a[2] == "show" {
       j, found := findJob(db, a[3])
-      if !found { println(cliErr("job not found"))  code = 81  return }
-      println("{\"ok\":true,\"job\":" + jobJSON(j) + "}")
+      if !found { println(cliErr(92, "not_found", "job not found"))  code = 92  return }
+      emit("{\"ok\":true,\"job\":" + jobJSON(j) + "}")
       return
     }
     if a[2] == "update" {
@@ -963,13 +963,13 @@ func runCLI(a) (code) {
         i = i + 1
       }
       if schedule == "" && script == "" && input == "" && !setEnabled {
-        println(cliErr("pass at least one of --schedule, --script, --input, --enable or --disable"))
+        println(cliErr(85, "validation_error", "pass at least one of --schedule, --script, --input, --enable or --disable"))
         code = 85
         return
       }
       out, uErr := updateJob(db, a[3], schedule, script, input, enabled, setEnabled)
-      if uErr != "" { println(cliErr(uErr))  code = 85  return }
-      println("{\"ok\":true,\"job\":" + out + "}")
+      if uErr != "" { println(cliErrAuto(uErr))  code = cliCodeAuto(uErr)  return }
+      emit("{\"ok\":true,\"job\":" + out + "}")
       return
     }
   }
@@ -977,8 +977,8 @@ func runCLI(a) (code) {
   if a[1] == "hooks" {
     if a[2] == "show" {
       h, found := findHook(db, a[3])
-      if !found { println(cliErr("hook not found"))  code = 81  return }
-      println("{\"ok\":true,\"hook\":" + hookJSON(h) + "}")
+      if !found { println(cliErr(92, "not_found", "hook not found"))  code = 92  return }
+      emit("{\"ok\":true,\"hook\":" + hookJSON(h) + "}")
       return
     }
     if a[2] == "update" {
@@ -1002,18 +1002,18 @@ func runCLI(a) (code) {
         i = i + 1
       }
       if script == "" && maxBytes < 0 && rateLimit < 0 && !setOrigin && !setEnabled {
-        println(cliErr("pass at least one of --script, --max-bytes, --rate-limit, --allow-origin, --enable or --disable"))
+        println(cliErr(85, "validation_error", "pass at least one of --script, --max-bytes, --rate-limit, --allow-origin, --enable or --disable"))
         code = 85
         return
       }
       out, uErr := updateHook(db, a[3], script, maxBytes, origin, rateLimit, enabled, setEnabled, setOrigin)
-      if uErr != "" { println(cliErr(uErr))  code = 85  return }
-      println("{\"ok\":true,\"hook\":" + out + "}")
+      if uErr != "" { println(cliErrAuto(uErr))  code = cliCodeAuto(uErr)  return }
+      emit("{\"ok\":true,\"hook\":" + out + "}")
       return
     }
     if a[2] == "test" {
       h, found := findHook(db, a[3])
-      if !found { println(cliErr("hook not found"))  code = 81  return }
+      if !found { println(cliErr(92, "not_found", "hook not found"))  code = 92  return }
       body := ""
       method := "POST"
       headers := []string{}
@@ -1037,7 +1037,7 @@ func runCLI(a) (code) {
         i = i + 1
       }
       s2, scriptFound := findScript(db, h.script)
-      if !scriptFound { println(cliErr("the hook names a script that does not exist: " + h.script))  code = 81  return }
+      if !scriptFound { println(cliErr(92, "not_found", "the hook names a script that does not exist: " + h.script))  code = 92  return }
       // Deliberately runs the script WITHOUT the hook's rate limit, body cap
       // or CORS: those are properties of the public door, and a test is not
       // coming through it. The envelope is the real one.
@@ -1048,7 +1048,7 @@ func runCLI(a) (code) {
         code = 85
         return
       }
-      println("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
+      emit("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
       return
     }
   }
@@ -1056,8 +1056,8 @@ func runCLI(a) (code) {
   if a[1] == "script" {
     if a[2] == "show" {
       sc, found := findScript(db, a[3])
-      if !found { println(cliErr("script not found"))  code = 81  return }
-      println("{\"ok\":true,\"script\":" + scriptJSON(sc) + "}")
+      if !found { println(cliErr(92, "not_found", "script not found"))  code = 92  return }
+      emit("{\"ok\":true,\"script\":" + scriptJSON(sc) + "}")
       return
     }
     if a[2] == "test" {
@@ -1077,19 +1077,21 @@ func runCLI(a) (code) {
         if a[i] == "--allow-net" { if i+1 < len(a) { allowNet = a[i+1] } }
         i = i + 1
       }
-      if source == "" { println(cliErr("script test needs --file <path|->"))  code = 85  return }
+      if source == "" { println(cliErr(85, "validation_error", "script test needs --file <path|->"))  code = 85  return }
       value, rErr := runSource(db, source, input, timeout, allowNet, anonCaller())
       if rErr != "" {
         println("{\"ok\":false,\"status\":\"error\",\"error\":" + jsonQuote(rErr) + ",\"value\":null}")
         code = 85
         return
       }
-      println("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
+      emit("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
       return
     }
   }
 
-  println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
+  // bkn answers this with the two commands that would have told the caller
+  // what exists; an error that names its own cure costs nothing to emit.
+  println(cliErrS(80, "unknown_command", "unknown command", []string{"bkn help-json", "bkn guide"}))
   code = 80
 }
 
@@ -1117,7 +1119,66 @@ func ruleSummary(acc) (out) {
   out = join(parts, ",")
 }
 
-func cliErr(msg) (s) { s = "{\"ok\":false,\"error\":{\"message\":" + jsonQuote(msg) + "}}" }
+// Every successful command answers with the schema version, so a consumer can
+// tell "this build has no such field" from "this field was renamed". Errors
+// do not carry it: they carry `code`, which is what an agent branches on.
+func emit(body) {
+  if has_suffix(body, "}") {
+    println(substr(body, 0, len(body) - 1) + ",\"version\":\"1.0\"}")
+    return
+  }
+  println(body)
+}
+
+// The library layer answers with a message and no type, so the CLI classifies
+// at the boundary. Matching on text is fragile and I would rather thread a
+// type through every function that can fail -- but an agent branching on
+// `not_found` versus `already_exists` is worth more today than the purity,
+// and the assertion that error.code equals the exit code still holds either
+// way.
+func errKind(msg) (code, kind) {
+  code = 85
+  kind = "validation_error"
+  if has_suffix(msg, "not found") { code = 92  kind = "not_found"  return }
+  if index(msg, "already exists") >= 0 { code = 95  kind = "already_exists"  return }
+}
+
+// Emit a library error with the code its message implies.
+func cliErrAuto(msg) (s) {
+  c, k := errKind(msg)
+  s = cliErr(c, k, msg)
+}
+
+func cliCodeAuto(msg) (c) {
+  code, _ := errKind(msg)
+  c = code
+}
+
+// The agent-first error envelope (contract/spec-output.md §3). `error.code`
+// MUST equal the process exit code: an agent reads one and branches on the
+// other, so a disagreement between them is a lie about what happened.
+func cliErr(code, kind, msg) (s) {
+  s = cliErrS(code, kind, msg, []string{})
+}
+
+func cliErrS(code, kind, msg, suggestions) (s) {
+  // `recoverable` is false throughout: 80-99 is input the caller must fix and
+  // 110 is a bug. The spec reserves true for the transient 100-109 band,
+  // which nothing here emits -- this tool does not retry internally and has
+  // no external dependency to be transiently unavailable.
+  s = "{\"ok\":false,\"error\":{\"code\":" + str(code) + ",\"type\":" + jsonQuote(kind) +
+      ",\"message\":" + jsonQuote(msg) + ",\"recoverable\":false"
+  if len(suggestions) > 0 {
+    parts := []string{}
+    i := 0
+    while i < len(suggestions) {
+      parts = append(parts, jsonQuote(suggestions[i]))
+      i = i + 1
+    }
+    s = s + ",\"suggestions\":[" + join(parts, ",") + "]"
+  }
+  s = s + "}}"
+}
 
 func baseName(p) (n) {
   n = p
@@ -1252,5 +1313,5 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"guide\":{\"args\":[],\"flags\":[\"--human\"]}")
   cmds = append(cmds, "\"version\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"help-json\":{\"args\":[],\"flags\":[]}")
-  s = "{\"ok\":true,\"version\":\"1.0\",\"exit_codes\":{\"0\":\"ok\",\"80\":\"unknown command\",\"81\":\"not found\",\"85\":\"validation error\",\"110\":\"datastore unavailable\"},\"commands\":{" + join(cmds, ",") + "}}"
+  s = "{\"ok\":true,\"version\":\"1.0\",\"exit_codes\":{\"0\":\"ok\",\"80\":\"invalid arguments or unknown command\",\"85\":\"validation error\",\"92\":\"not found\",\"110\":\"internal error\"},\"commands\":{" + join(cmds, ",") + "}}"
 }
