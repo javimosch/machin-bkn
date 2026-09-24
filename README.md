@@ -83,6 +83,22 @@ bin/bkn kv rekey
 | `BKN_ENCRYPTION_KEYS` | the SET of keys that may decrypt, as `id:material` pairs — `"v1:$OLD,v2:$NEW"` |
 | `BKN_ENCRYPTION_KEY_ID` | which of them seals new values (default `v1`) |
 
+## A live one
+
+<https://machin-bkn.vps1.intrane.fr> — point bkn's own suite at it rather than
+take the numbers on trust:
+
+```sh
+curl -s https://machin-bkn.vps1.intrane.fr/llms.txt
+
+cd ~/ai/bkn/test
+SP=$PWD BKN_TEST_URL=https://machin-bkn.vps1.intrane.fr bash t-store.sh
+```
+
+It holds the test fixtures and nothing else, every admin route is behind a
+token, and it binds the host's docker bridge rather than a public address —
+Traefik terminates TLS and is the only way in.
+
 ## Verifying it against the contract
 
 bkn's suites were written against its **live** instance and assume data seeded

@@ -182,7 +182,22 @@ bin/bkn <b>help-json</b>        <i># the command catalog</i></div>
 
 <h2>Checking it yourself</h2>
 
-<p>Seed the fixtures first, or the score means nothing:</p>
+<p>There is a live one at
+<a href="https://machin-bkn.vps1.intrane.fr/llms.txt"><code>machin-bkn.vps1.intrane.fr</code></a>,
+so you can point bkn's own suite at it rather than take any of this on trust.
+It holds the test fixtures and nothing else; every admin route is behind a
+token, so the public surface is the guide, the health probe and the seeded
+hooks.</p>
+
+<div class="arch">curl -s https://machin-bkn.vps1.intrane.fr/llms.txt
+curl -s https://machin-bkn.vps1.intrane.fr/guide | jq .guide.one_liner
+
+<i># and the suite itself, if you have bkn checked out</i>
+cd ~/ai/bkn/test
+SP=$PWD BKN_TEST_URL=https://machin-bkn.vps1.intrane.fr bash t-store.sh</div>
+
+<p>To run it against your own build instead, seed the fixtures first or the
+score means nothing:</p>
 
 <div class="arch">./test/seed-fixtures.sh bin/bkn ~/ai/bkn/examples ~/ai/bkn/test
 echo -n "$BKN_ADMIN_TOKEN" &gt; ~/ai/bkn/test/admin.tok   <i># dog.sh reads THIS file</i>
