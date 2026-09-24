@@ -228,3 +228,31 @@ func schedulerLoop(db) {
     }
   }
 }
+
+// Change only the fields named. A partial update that silently reset the
+// schedule to a default would be worse than refusing.
+func updateJob(db, name, schedule, script, input, enabled, setEnabled) (out, err) {
+  out = ""
+  err = ""
+  j, found := findJob(db, name)
+  if !found { err = "job not found"  return }
+  if schedule != "" {
+    if !validSchedule(schedule) { err = "schedule must be five cron fields or @every <duration>"  return }
+    sqlite_exec(db, "UPDATE cron_jobs SET schedule = ?, updated_at = ? WHERE name = ?", []string{schedule, nowStamp(), name})
+  }
+  if script != "" {
+    sqlite_exec(db, "UPDATE cron_jobs SET script = ?, updated_at = ? WHERE name = ?", []string{script, nowStamp(), name})
+  }
+  if input != "" {
+    if sqlite_query(db, "SELECT json_valid(?) AS v", []string{input}) == "[]" { err = "input is not valid JSON"  return }
+    if jsonField(sqlite_query(db, "SELECT json_valid(?) AS v", []string{input}), "[0].v") != "1" { err = "input is not valid JSON"  return }
+    sqlite_exec(db, "UPDATE cron_jobs SET input = ?, updated_at = ? WHERE name = ?", []string{input, nowStamp(), name})
+  }
+  if setEnabled {
+    e := 0
+    if enabled { e = 1 }
+    sqlite_exec(db, "UPDATE cron_jobs SET enabled = CAST(? AS INTEGER), updated_at = ? WHERE name = ?", []string{str(e), nowStamp(), name})
+  }
+  updated, _ := findJob(db, name)
+  out = jobJSON(updated)
+}

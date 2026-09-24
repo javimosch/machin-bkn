@@ -676,8 +676,299 @@ func runCLI(a) (code) {
     }
   }
 
+  if a[1] == "store" {
+    if a[2] == "create" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      rules := []string{}
+      i := 4
+      while i < len(a) {
+        if a[i] == "--normalize" {
+          if i+1 < len(a) {
+            pair := a[i+1]
+            eq := index(pair, "=")
+            if eq > 0 {
+              rules = append(rules, jsonQuote(substr(pair, 0, eq)) + ":" + jsonQuote(substr(pair, eq+1, len(pair))))
+            }
+          }
+        }
+        i = i + 1
+      }
+      ensureCollection(db, ns, coll)
+      if len(rules) > 0 { setNormalizers(db, ns, coll, "{" + join(rules, ",") + "}") }
+      println("{\"ok\":true,\"collection\":{\"ref\":" + jsonQuote(ns + "/" + coll) + ",\"normalize\":" + normalizersOf(db, ns, coll) + "}}")
+      return
+    }
+    if a[2] == "delete" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      if !deleteDoc(db, ns, coll, a[4]) { println(cliErr("record not found"))  code = 81  return }
+      println("{\"ok\":true,\"deleted\":true}")
+      return
+    }
+    if a[2] == "patch" {
+      ns, coll, refErr := splitRef(a[3])
+      if refErr != "" { println(cliErr(refErr))  code = 85  return }
+      patch := ""
+      i := 5
+      while i < len(a) {
+        if a[i] == "--data" {
+          if i+1 < len(a) {
+            if a[i+1] == "-" { patch = read_stdin() } else { patch = dataArg(a[i+1]) }
+          }
+        }
+        i = i + 1
+      }
+      if patch == "" { println(cliErr("patch needs --data <json|@file|->"))  code = 85  return }
+      rec, found, pErr, _ := patchDocIf(db, ns, coll, a[4], patch, "", "")
+      if pErr != "" { println(cliErr(pErr))  code = 85  return }
+      if !found { println(cliErr("record not found"))  code = 81  return }
+      println("{\"ok\":true,\"record\":" + rec + "}")
+      return
+    }
+  }
+
+  if a[1] == "kv" {
+    if a[2] == "delete" {
+      if !kvDelete(db, a[3]) { println(cliErr("key not found"))  code = 81  return }
+      println("{\"ok\":true,\"deleted\":true}")
+      return
+    }
+    if a[2] == "rekey" {
+      rekeyed, skipped, failed, rErr := kvRekey(db)
+      body := "{\"ok\":true,\"rekeyed\":" + str(rekeyed) + ",\"skipped\":" + str(skipped) + ",\"failed\":" + str(failed) + ",\"key_id\":" + jsonQuote(activeKeyID()) + "}"
+      if rErr != "" {
+        println("{\"ok\":false,\"rekeyed\":" + str(rekeyed) + ",\"skipped\":" + str(skipped) + ",\"failed\":" + str(failed) + ",\"error\":{\"message\":" + jsonQuote(rErr) + "}}")
+        code = 85
+        return
+      }
+      println(body)
+      return
+    }
+  }
+
+  if a[1] == "events" {
+    if a[2] == "prune" {
+      olderThan := ""
+      stream := ""
+      i := 3
+      while i < len(a) {
+        if a[i] == "--older-than" { if i+1 < len(a) { olderThan = a[i+1] } }
+        if a[i] == "--stream" { if i+1 < len(a) { stream = a[i+1] } }
+        i = i + 1
+      }
+      removed, pErr := pruneEvents(db, olderThan, stream)
+      if pErr != "" { println(cliErr(pErr))  code = 85  return }
+      println("{\"ok\":true,\"removed\":" + str(removed) + "}")
+      return
+    }
+  }
+
+  if a[1] == "files" {
+    if a[2] == "delete" {
+      dErr := deleteFile(db, a[3], a[4])
+      if dErr != "" { println(cliErr(dErr))  code = 81  return }
+      println("{\"ok\":true,\"deleted\":true}")
+      return
+    }
+  }
+
+  if a[1] == "lock" {
+    if a[2] == "acquire" {
+      ttl := 60
+      i := 4
+      while i < len(a) {
+        if a[i] == "--ttl" { if i+1 < len(a) { ttl = parseAge(a[i+1]) } }
+        i = i + 1
+      }
+      owner, ok := acquireLock(db, a[3], ttl)
+      // Held by someone else is an ordinary answer, not an error: the caller
+      // asked whether it could have the lock and the answer is no.
+      if !ok { println("{\"ok\":true,\"acquired\":false}")  return }
+      println("{\"ok\":true,\"acquired\":true,\"owner\":" + jsonQuote(owner) + ",\"ttl\":" + str(ttl) + "}")
+      return
+    }
+    if a[2] == "release" {
+      force := false
+      i := 4
+      while i < len(a) {
+        if a[i] == "--force" { force = true }
+        i = i + 1
+      }
+      owner := ""
+      if len(a) > 4 { if !has_prefix(a[4], "--") { owner = a[4] } }
+      if force {
+        // --force exists for the case the owner token was lost. It is the
+        // only way to break a live lease, so it must be asked for explicitly.
+        if !forceReleaseLock(db, a[3]) { println(cliErr("lock not found"))  code = 81  return }
+        println("{\"ok\":true,\"released\":true,\"forced\":true}")
+        return
+      }
+      if owner == "" { println(cliErr("release needs the owner token, or --force"))  code = 85  return }
+      if !releaseLock(db, a[3], owner) { println(cliErr("lock not found, or the owner token does not match"))  code = 81  return }
+      println("{\"ok\":true,\"released\":true}")
+      return
+    }
+  }
+
+  if a[1] == "cron" {
+    if a[2] == "show" {
+      j, found := findJob(db, a[3])
+      if !found { println(cliErr("job not found"))  code = 81  return }
+      println("{\"ok\":true,\"job\":" + jobJSON(j) + "}")
+      return
+    }
+    if a[2] == "update" {
+      schedule := ""
+      script := ""
+      input := ""
+      enabled := false
+      setEnabled := false
+      i := 4
+      while i < len(a) {
+        if a[i] == "--schedule" { if i+1 < len(a) { schedule = a[i+1] } }
+        if a[i] == "--script" { if i+1 < len(a) { script = a[i+1] } }
+        if a[i] == "--input" { if i+1 < len(a) { input = dataArg(a[i+1]) } }
+        if a[i] == "--enable" { enabled = true  setEnabled = true }
+        if a[i] == "--disable" { enabled = false  setEnabled = true }
+        i = i + 1
+      }
+      if schedule == "" && script == "" && input == "" && !setEnabled {
+        println(cliErr("pass at least one of --schedule, --script, --input, --enable or --disable"))
+        code = 85
+        return
+      }
+      out, uErr := updateJob(db, a[3], schedule, script, input, enabled, setEnabled)
+      if uErr != "" { println(cliErr(uErr))  code = 85  return }
+      println("{\"ok\":true,\"job\":" + out + "}")
+      return
+    }
+  }
+
+  if a[1] == "hooks" {
+    if a[2] == "show" {
+      h, found := findHook(db, a[3])
+      if !found { println(cliErr("hook not found"))  code = 81  return }
+      println("{\"ok\":true,\"hook\":" + hookJSON(h) + "}")
+      return
+    }
+    if a[2] == "update" {
+      script := ""
+      origin := ""
+      setOrigin := false
+      // -1 means "leave alone": zero is a real value for both of these
+      // (no cap, no limit), so it cannot double as absent.
+      maxBytes := 0 - 1
+      rateLimit := 0 - 1
+      enabled := false
+      setEnabled := false
+      i := 4
+      while i < len(a) {
+        if a[i] == "--script" { if i+1 < len(a) { script = a[i+1] } }
+        if a[i] == "--max-bytes" { if i+1 < len(a) { maxBytes = parse_int(a[i+1]) } }
+        if a[i] == "--rate-limit" { if i+1 < len(a) { rateLimit = parse_int(a[i+1]) } }
+        if a[i] == "--allow-origin" { if i+1 < len(a) { origin = a[i+1]  setOrigin = true } }
+        if a[i] == "--enable" { enabled = true  setEnabled = true }
+        if a[i] == "--disable" { enabled = false  setEnabled = true }
+        i = i + 1
+      }
+      if script == "" && maxBytes < 0 && rateLimit < 0 && !setOrigin && !setEnabled {
+        println(cliErr("pass at least one of --script, --max-bytes, --rate-limit, --allow-origin, --enable or --disable"))
+        code = 85
+        return
+      }
+      out, uErr := updateHook(db, a[3], script, maxBytes, origin, rateLimit, enabled, setEnabled, setOrigin)
+      if uErr != "" { println(cliErr(uErr))  code = 85  return }
+      println("{\"ok\":true,\"hook\":" + out + "}")
+      return
+    }
+    if a[2] == "test" {
+      h, found := findHook(db, a[3])
+      if !found { println(cliErr("hook not found"))  code = 81  return }
+      body := ""
+      method := "POST"
+      headers := []string{}
+      i := 4
+      while i < len(a) {
+        if a[i] == "--body" {
+          if i+1 < len(a) {
+            if a[i+1] == "-" { body = read_stdin() } else { body = dataArg(a[i+1]) }
+          }
+        }
+        if a[i] == "--method" { if i+1 < len(a) { method = a[i+1] } }
+        if a[i] == "--header" {
+          if i+1 < len(a) {
+            pair := a[i+1]
+            eq := index(pair, "=")
+            if eq > 0 {
+              headers = append(headers, jsonQuote(to_lower(substr(pair, 0, eq))) + ":" + jsonQuote(substr(pair, eq+1, len(pair))))
+            }
+          }
+        }
+        i = i + 1
+      }
+      s2, scriptFound := findScript(db, h.script)
+      if !scriptFound { println(cliErr("the hook names a script that does not exist: " + h.script))  code = 81  return }
+      // Deliberately runs the script WITHOUT the hook's rate limit, body cap
+      // or CORS: those are properties of the public door, and a test is not
+      // coming through it. The envelope is the real one.
+      d := hookEnvelope(method, "/v1/hooks/" + h.name, "{}", "{" + join(headers, ",") + "}", body, "127.0.0.1")
+      value, rErr := runSource(db, s2.source, d, s2.timeout_ms, s2.allow_net, anonCaller())
+      if rErr != "" {
+        println("{\"ok\":false,\"status\":\"error\",\"error\":" + jsonQuote(rErr) + ",\"value\":null}")
+        code = 85
+        return
+      }
+      println("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
+      return
+    }
+  }
+
+  if a[1] == "script" {
+    if a[2] == "show" {
+      sc, found := findScript(db, a[3])
+      if !found { println(cliErr("script not found"))  code = 81  return }
+      println("{\"ok\":true,\"script\":" + scriptJSON(sc) + "}")
+      return
+    }
+    if a[2] == "test" {
+      source := ""
+      input := "{}"
+      timeout := 5000
+      allowNet := ""
+      i := 3
+      while i < len(a) {
+        if a[i] == "--file" {
+          if i+1 < len(a) {
+            if a[i+1] == "-" { source = read_stdin() } else { source = read_file(a[i+1]) }
+          }
+        }
+        if a[i] == "--input" { if i+1 < len(a) { input = dataArg(a[i+1]) } }
+        if a[i] == "--timeout" { if i+1 < len(a) { timeout = parse_int(a[i+1]) } }
+        if a[i] == "--allow-net" { if i+1 < len(a) { allowNet = a[i+1] } }
+        i = i + 1
+      }
+      if source == "" { println(cliErr("script test needs --file <path|->"))  code = 85  return }
+      value, rErr := runSource(db, source, input, timeout, allowNet, anonCaller())
+      if rErr != "" {
+        println("{\"ok\":false,\"status\":\"error\",\"error\":" + jsonQuote(rErr) + ",\"value\":null}")
+        code = 85
+        return
+      }
+      println("{\"ok\":true,\"status\":\"ok\",\"value\":" + value + "}")
+      return
+    }
+  }
+
   println("{\"ok\":false,\"error\":{\"message\":\"unknown command\"}}")
   code = 80
+}
+
+// `--data`/`--input` take raw JSON or @file; `-` for stdin is handled at the
+// call site, because only some flags accept it.
+func dataArg(v) (out) {
+  out = v
+  if has_prefix(v, "@") { out = read_file(substr(v, 1, len(v))) }
 }
 
 func cliErr(msg) (s) { s = "{\"ok\":false,\"error\":{\"message\":" + jsonQuote(msg) + "}}" }
@@ -740,9 +1031,14 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"store get\":{\"args\":[\"ns/coll\",\"id\"],\"flags\":[]}")
   cmds = append(cmds, "\"store list\":{\"args\":[\"ns/coll\"],\"flags\":[\"--where <predicate>\",\"--order-by <field[:desc]>\",\"--limit <n>\",\"--offset <n>\"]}")
   cmds = append(cmds, "\"store find\":{\"args\":[\"ns/coll\"],\"flags\":[\"--where <predicate>\"]}")
+  cmds = append(cmds, "\"store create\":{\"args\":[\"ns/coll\"],\"flags\":[\"--normalize <field=rule>\"]}")
+  cmds = append(cmds, "\"store patch\":{\"args\":[\"ns/coll\",\"id\"],\"flags\":[\"--data <json|@file|->\"]}")
+  cmds = append(cmds, "\"store delete\":{\"args\":[\"ns/coll\",\"id\"],\"flags\":[]}")
   cmds = append(cmds, "\"store collections\":{\"args\":[],\"flags\":[\"--ns <namespace>\"]}")
   cmds = append(cmds, "\"kv get\":{\"args\":[\"key\"],\"flags\":[]}")
   cmds = append(cmds, "\"kv set\":{\"args\":[\"key\",\"value\"],\"flags\":[\"--type <string|json|encrypted>\",\"--public\"]}")
+  cmds = append(cmds, "\"kv delete\":{\"args\":[\"key\"],\"flags\":[]}")
+  cmds = append(cmds, "\"kv rekey\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"kv list\":{\"args\":[],\"flags\":[\"--prefix <p>\"]}")
   cmds = append(cmds, "\"auth user create\":{\"args\":[\"email\"],\"flags\":[\"--password-stdin\",\"--password <p>\",\"--name <n>\",\"--role <user|admin>\"]}")
   cmds = append(cmds, "\"auth user list\":{\"args\":[],\"flags\":[]}")
@@ -771,25 +1067,36 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"files put\":{\"args\":[\"ns\",\"path\"],\"flags\":[\"--name <n>\",\"--content-type <t>\"]}")
   cmds = append(cmds, "\"files get\":{\"args\":[\"ns\",\"name\"],\"flags\":[\"--out <path>\"]}")
   cmds = append(cmds, "\"files show\":{\"args\":[\"ns\",\"name\"],\"flags\":[]}")
+  cmds = append(cmds, "\"files delete\":{\"args\":[\"namespace\",\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"files list\":{\"args\":[\"ns\"],\"flags\":[]}")
   cmds = append(cmds, "\"events emit\":{\"args\":[\"stream\",\"type\"],\"flags\":[\"--level <l>\",\"--subject <s>\",\"--data <json>\"]}")
   cmds = append(cmds, "\"events list\":{\"args\":[\"stream\"],\"flags\":[\"--level <l>\",\"--since <age>\",\"--limit <n>\"]}")
+  cmds = append(cmds, "\"events prune\":{\"args\":[],\"flags\":[\"--older-than <age>\",\"--stream <s>\"]}")
   cmds = append(cmds, "\"events streams\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"events stats\":{\"args\":[\"stream\"],\"flags\":[\"--by <type|level|source|subject>\",\"--since <age>\"]}")
   cmds = append(cmds, "\"script create\":{\"args\":[\"name\"],\"flags\":[\"--file <path>\",\"--allow-net <hosts>\",\"--timeout <ms>\"]}")
   cmds = append(cmds, "\"script run\":{\"args\":[\"name\"],\"flags\":[\"--input <json|@file|->\"]}")
   cmds = append(cmds, "\"script runs\":{\"args\":[\"name\"],\"flags\":[\"--limit <n>\"]}")
   cmds = append(cmds, "\"script list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"script show\":{\"args\":[\"name\"],\"flags\":[]}")
+  cmds = append(cmds, "\"script test\":{\"args\":[],\"flags\":[\"--file <path|->\",\"--input <json>\",\"--timeout <ms>\",\"--allow-net <hosts>\"]}")
   cmds = append(cmds, "\"script delete\":{\"args\":[\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"script update\":{\"args\":[\"name\"],\"flags\":[\"--run-access <admin|user|public>\"]}")
   cmds = append(cmds, "\"hooks create\":{\"args\":[\"name\"],\"flags\":[\"--script <s>\",\"--allow-origin <o>\",\"--rate-limit <n>\"]}")
+  cmds = append(cmds, "\"hooks show\":{\"args\":[\"name\"],\"flags\":[]}")
+  cmds = append(cmds, "\"hooks update\":{\"args\":[\"name\"],\"flags\":[\"--script <s>\",\"--max-bytes <n>\",\"--allow-origin <origin>\",\"--rate-limit <n>\",\"--enable\",\"--disable\"]}")
+  cmds = append(cmds, "\"hooks test\":{\"args\":[\"name\"],\"flags\":[\"--body <raw|@file|->\",\"--header <name=value>\",\"--method <m>\"]}")
   cmds = append(cmds, "\"hooks delete\":{\"args\":[\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"hooks list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"cron create\":{\"args\":[\"name\"],\"flags\":[\"--schedule <expr>\",\"--script <s>\"]}")
   cmds = append(cmds, "\"cron list\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"cron show\":{\"args\":[\"name\"],\"flags\":[]}")
+  cmds = append(cmds, "\"cron update\":{\"args\":[\"name\"],\"flags\":[\"--schedule <expr>\",\"--script <s>\",\"--input <json>\",\"--enable\",\"--disable\"]}")
   cmds = append(cmds, "\"cron delete\":{\"args\":[\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"cron run\":{\"args\":[\"name\"],\"flags\":[]}")
   cmds = append(cmds, "\"cron tick\":{\"args\":[],\"flags\":[]}")
+  cmds = append(cmds, "\"lock acquire\":{\"args\":[\"key\"],\"flags\":[\"--ttl <duration>\"]}")
+  cmds = append(cmds, "\"lock release\":{\"args\":[\"key\",\"owner\"],\"flags\":[\"--force\"]}")
   cmds = append(cmds, "\"lock list\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"serve\":{\"args\":[],\"flags\":[\"--host <h>\",\"--port <n>\"]}")
   cmds = append(cmds, "\"guide\":{\"args\":[],\"flags\":[\"--human\"]}")

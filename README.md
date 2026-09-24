@@ -61,12 +61,25 @@ bin/bkn guide            # the whole mental model, embedded in the binary
 bin/bkn help-json        # the command catalog
 ```
 
+Rotating the encryption key needs no downtime: add the new key to the set,
+point the id at it, and rewrite what is already sealed. Values keep the id
+they were sealed under until they are rewritten, and anything `rekey` cannot
+open is counted and **left untouched** rather than destroyed.
+
+```sh
+export BKN_ENCRYPTION_KEYS="v1:$OLD,v2:$NEW"
+export BKN_ENCRYPTION_KEY_ID=v2
+bin/bkn kv rekey
+```
+
 | Variable | Purpose |
 |---|---|
 | `BKN_DATA` | datastore path (default `bkn.db`) |
 | `BKN_HOST` / `BKN_PORT` | serve bind defaults (`127.0.0.1` / `7799`); flags win |
 | `BKN_ADMIN_TOKEN` | bearer token gating every admin route |
-| `BKN_ENCRYPTION_KEY` | 32 chars; required for `kv --type encrypted` |
+| `BKN_ENCRYPTION_KEY` | 32 chars; required for `kv --type encrypted`. Always stamps key id `v1` |
+| `BKN_ENCRYPTION_KEYS` | the SET of keys that may decrypt, as `id:material` pairs — `"v1:$OLD,v2:$NEW"` |
+| `BKN_ENCRYPTION_KEY_ID` | which of them seals new values (default `v1`) |
 
 ## Verifying it against the contract
 
@@ -120,7 +133,9 @@ src/                store, access, auth, kv, files, events, cron, hooks,
                     script (QuickJS host), guide, ulid, http, cli
 vendor/             QuickJS + the C bridge
 contract/           bkn's published contract — the ONLY legitimate source
-test/               unit mains, the concurrency harness, seed-fixtures.sh
+test/               unit mains, the concurrency harness, seed-fixtures.sh,
+                    and the CLI suites the contract cannot reach:
+                    catalog.sh, auth-cli.sh, cli-surface.sh
 ```
 
 ## License

@@ -789,3 +789,35 @@ func runScriptAs(db, name, input, caller) (value, err) {
   value = v
   recordRun(db, name, "ok", took, "", logs, value)
 }
+
+// --- testing --------------------------------------------------------------
+
+// Run source that is NOT installed. Nothing is recorded: there is no script
+// for a run to belong to, and a test that littered the run history would make
+// the history useless for the thing it is for.
+func runSource(db, source, input, timeoutMs, allowNet, caller) (value, err) {
+  value = "null"
+  err = ""
+  if source == "" { err = "script source is empty"  return }
+  if timeoutMs <= 0 { timeoutMs = 5000 }
+  if input == "" { input = "{}" }
+  gCaller = caller
+
+  raw := bkn_js_eval(source, input, timeoutMs, 0, db, "test", allowNet)
+  ok, _ := json_get(raw, ".ok")
+  if ok != "true" {
+    err = jsonField(raw, ".error")
+    if err == "" { err = "the script failed with no message" }
+    return
+  }
+  v, vErr := json_get(raw, ".value")
+  if vErr != "" { v = "null" }
+  value = v
+}
+
+// The request envelope a hook hands its script. Built here rather than only
+// inside the HTTP route so `hooks test` exercises the SAME shape a real
+// request would -- a test against a different envelope tests nothing.
+func hookEnvelope(method, path, queryJSON, headersJSON, body, ip) (d) {
+  d = "{\"method\":" + jsonQuote(method) + ",\"path\":" + jsonQuote(path) + ",\"query\":" + queryJSON + ",\"headers\":" + headersJSON + ",\"body\":" + jsonQuote(body) + ",\"body_base64\":" + jsonQuote(base64_encode_bytes(bytes(body))) + ",\"ip\":" + jsonQuote(ip) + "}"
+}

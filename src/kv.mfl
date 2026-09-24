@@ -74,12 +74,78 @@ func encryptionKey() (key, ok) {
   }
 }
 
+// --- key rotation ---------------------------------------------------------
+//
+// BKN_ENCRYPTION_KEYS is the SET of keys that may decrypt, as "id:material"
+// pairs; BKN_ENCRYPTION_KEY_ID names the one that encrypts. Rotation is:
+// add a key, point the id at it, run `kv rekey`. Every value keeps the id it
+// was sealed under until it is rewritten, so nothing has to stop.
+//
+// A lone BKN_ENCRYPTION_KEY always stamps "v1" -- the format the Node backend
+// wrote -- so two different single keys both claim v1 and rekey cannot tell
+// them apart. That is why the keys form exists.
+
+func defaultKeyID() (s) { s = "v1" }
+
+// The id new values are sealed under.
+func activeKeyID() (id) {
+  id = env("BKN_ENCRYPTION_KEY_ID")
+  if id != "" { return }
+  id = defaultKeyID()
+}
+
+// Scans BKN_ENCRYPTION_KEYS for one id. Parsing on every call rather than
+// caching: a key set is read a handful of times per process, and a cache is
+// one more place for stale key material to live.
+func keyByID(want) (key, ok) {
+  key = bytes("")
+  ok = false
+  raw := env("BKN_ENCRYPTION_KEYS")
+  if raw == "" { return }
+  pairs := split(raw, ",")
+  i := 0
+  while i < len(pairs) {
+    pair := trim(pairs[i])
+    cut := index(pair, ":")
+    if cut > 0 {
+      id := trim(substr(pair, 0, cut))
+      if id == want {
+        k, good := parseKeyMaterial(trim(substr(pair, cut+1, len(pair))))
+        if good { key = k  ok = true  return }
+      }
+    }
+    i = i + 1
+  }
+}
+
+// The key that seals. Falls back to the single-key variables so an existing
+// deployment keeps working untouched.
+func sealingKey() (key, id, ok) {
+  id = activeKeyID()
+  key, ok = keyByID(id)
+  if ok { return }
+  key, ok = encryptionKey()
+}
+
+// The key that opens THIS payload, chosen by the id it was sealed under.
+func openingKey(keyID) (key, ok) {
+  want := keyID
+  if want == "" { want = defaultKeyID() }
+  key, ok = keyByID(want)
+  if ok { return }
+  // No keys-set entry for that id: a store written before rotation existed,
+  // or a single-key deployment. Either way the single key is the only
+  // candidate, and a wrong one fails the GCM tag rather than silently
+  // returning rubbish.
+  key, ok = encryptionKey()
+}
+
 // --- sealing --------------------------------------------------------------
 
 func kvSeal(plain) (payload, err) {
   payload = ""
   err = ""
-  key, ok := encryptionKey()
+  key, keyID, ok := sealingKey()
   if !ok { err = "no encryption key configured"  return }
 
   iv := rand_bytes(12)
@@ -90,14 +156,27 @@ func kvSeal(plain) (payload, err) {
   // The builtin returns ciphertext||tag; the wire format keeps them apart.
   ct := bytes_sub(sealed, 0, cut)
   tag := bytes_sub(sealed, cut, len(sealed))
-  payload = "{\"alg\":\"aes-256-gcm\",\"keyId\":\"v1\",\"iv\":" + jsonQuote(base64_encode_bytes(iv)) + ",\"tag\":" + jsonQuote(base64_encode_bytes(tag)) + ",\"ciphertext\":" + jsonQuote(base64_encode_bytes(ct)) + "}"
+  payload = "{\"alg\":\"aes-256-gcm\",\"keyId\":" + jsonQuote(keyID) + ",\"iv\":" + jsonQuote(base64_encode_bytes(iv)) + ",\"tag\":" + jsonQuote(base64_encode_bytes(tag)) + ",\"ciphertext\":" + jsonQuote(base64_encode_bytes(ct)) + "}"
 }
 
 func kvOpen(payload) (plain, err) {
   plain = ""
   err = ""
-  key, ok := encryptionKey()
-  if !ok { err = "no encryption key configured"  return }
+  payloadKey := jsonField(payload, ".keyId")
+  key, ok := openingKey(payloadKey)
+  if !ok {
+    // Naming the id matters during a rotation: "no key configured" sends the
+    // reader to look at BKN_ENCRYPTION_KEY when the real answer is that the
+    // id this value was sealed under is not in the set.
+    if payloadKey != "" {
+      if env("BKN_ENCRYPTION_KEYS") != "" {
+        err = "no key with id " + payloadKey + " in BKN_ENCRYPTION_KEYS"
+        return
+      }
+    }
+    err = "no encryption key configured"
+    return
+  }
 
   alg := jsonField(payload, ".alg")
   if alg != "aes-256-gcm" { err = "unsupported encryption algorithm"  return }
@@ -219,4 +298,48 @@ func kvDelete(db, key) (found) {
   if !ok { return }
   sqlite_exec(db, "DELETE FROM kv WHERE key = ?", []string{key})
   found = true
+}
+
+// Re-seal every encrypted entry under the key that BKN_ENCRYPTION_KEY_ID now
+// names. Values already at that id are left alone, so running it twice costs
+// nothing and a partial run can simply be repeated.
+//
+// It opens with the id each value carries and seals with the active one, so
+// the old key must still be present in BKN_ENCRYPTION_KEYS while this runs --
+// that is the whole point of the set being a set.
+func kvRekey(db) (rekeyed, skipped, failed, err) {
+  rekeyed = 0
+  skipped = 0
+  failed = 0
+  err = ""
+  _, target, ok := sealingKey()
+  if !ok { err = "no encryption key configured"  return }
+
+  rows := sqlite_query(db, "SELECT key AS key, value AS value, type AS kind, description AS description, public AS public, updated_at AS updated_at FROM kv WHERE type = 'encrypted' ORDER BY key", []string{})
+  if rows == "[]" { return }
+  entries := parse(rows, []KvEntry{})
+  i := 0
+  while i < len(entries) {
+    e := entries[i]
+    if jsonField(e.value, ".keyId") == target {
+      skipped = skipped + 1
+    } else {
+      plain, openErr := kvOpen(e.value)
+      if openErr != "" {
+        // Left exactly as it was. A value we cannot open is a value whose key
+        // is missing from the set, and overwriting it would destroy it.
+        failed = failed + 1
+      } else {
+        sealed, sealErr := kvSeal(plain)
+        if sealErr != "" {
+          failed = failed + 1
+        } else {
+          sqlite_exec(db, "UPDATE kv SET value = ?, updated_at = ? WHERE key = ?", []string{sealed, nowStamp(), e.key})
+          rekeyed = rekeyed + 1
+        }
+      }
+    }
+    i = i + 1
+  }
+  if failed > 0 { err = str(failed) + " entries could not be opened with the keys in BKN_ENCRYPTION_KEYS and were left untouched" }
 }

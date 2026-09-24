@@ -158,3 +158,47 @@ func renewLock(db, key, owner, ttl) (ok) {
   sqlite_exec(db, "UPDATE locks SET expires_at = CAST(? AS INTEGER) WHERE key = ? AND owner = ?", []string{str(ts + ttl), key, owner})
   ok = true
 }
+
+// Change only the fields named. maxBytes and rateLimit are ints with a
+// meaningful zero ("no limit"), so they take a negative sentinel for "leave
+// alone" rather than being unable to express it.
+func updateHook(db, name, script, maxBytes, allowOrigin, rateLimit, enabled, setEnabled, setOrigin) (out, err) {
+  out = ""
+  err = ""
+  _, found := findHook(db, name)
+  if !found { err = "hook not found"  return }
+  if script != "" {
+    _, scriptFound := findScript(db, script)
+    // A hook pointing at a script that is not there answers 404 for every
+    // caller, which looks like the hook is missing rather than misconfigured.
+    if !scriptFound { err = "no such script: " + script  return }
+    sqlite_exec(db, "UPDATE hooks SET script = ?, updated_at = ? WHERE name = ?", []string{script, nowStamp(), name})
+  }
+  if maxBytes >= 0 {
+    sqlite_exec(db, "UPDATE hooks SET max_bytes = CAST(? AS INTEGER), updated_at = ? WHERE name = ?", []string{str(maxBytes), nowStamp(), name})
+  }
+  if rateLimit >= 0 {
+    sqlite_exec(db, "UPDATE hooks SET rate_limit = CAST(? AS INTEGER), updated_at = ? WHERE name = ?", []string{str(rateLimit), nowStamp(), name})
+  }
+  if setOrigin {
+    sqlite_exec(db, "UPDATE hooks SET allow_origin = ?, updated_at = ? WHERE name = ?", []string{allowOrigin, nowStamp(), name})
+  }
+  if setEnabled {
+    e := 0
+    if enabled { e = 1 }
+    sqlite_exec(db, "UPDATE hooks SET enabled = CAST(? AS INTEGER), updated_at = ? WHERE name = ?", []string{str(e), nowStamp(), name})
+  }
+  h, _ := findHook(db, name)
+  out = hookJSON(h)
+}
+
+// Break a lease without its owner token. The only way out when the holder
+// died without releasing, and deliberately separate from releaseLock so it
+// cannot happen by passing the wrong owner.
+func forceReleaseLock(db, key) (ok) {
+  ok = false
+  rows := sqlite_query(db, "SELECT owner AS k, 0 AS n FROM locks WHERE key = ?", []string{key})
+  if rows == "[]" { return }
+  sqlite_exec(db, "DELETE FROM locks WHERE key = ?", []string{key})
+  ok = true
+}
