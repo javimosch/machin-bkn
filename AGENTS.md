@@ -135,6 +135,14 @@ is absent from `help-json` does not exist for any caller:
 | `test/cli-surface.sh` | 89 | store, kv, events, files, locks, cron, hooks, scripts — including a key rotation that must not destroy what it cannot open |
 | `test/auth-cli.sh` | 34 | sessions, refresh rotation, revocation, the operator's reset |
 
+`test/deploy-gate.sh` runs the full 191 against the deployed instance at
+<https://machin-bkn.vps1.intrane.fr> — 172 over HTTPS, and `t-scriptaccess`'s
+19 on the host against the deployed binary, which is the only honest way to
+count it: that suite owns its own server and database by design. The script
+takes a lock, because two gate runs against one instance share seeded
+fixtures and fail in a way that looks like real bugs rather than a collision
+(`$append concatenates: got cdabcd want abcd`).
+
 Fixture setup for the gate is `test/seed-fixtures.sh`; without it the suites
 fail for the wrong reasons entirely — see the runbook below.
 
