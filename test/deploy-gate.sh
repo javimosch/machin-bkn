@@ -23,6 +23,7 @@ URL="https://machin-bkn.vps1.intrane.fr"
 HOST="vps1"
 REMOTE="/opt/machin-bkn"
 SUITES="$HOME/ai/bkn/test"
+ONHOST=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +31,13 @@ while [ $# -gt 0 ]; do
     --host)   HOST="$2"; shift 2 ;;
     --remote) REMOTE="$2"; shift 2 ;;
     --suites) SUITES="$2"; shift 2 ;;
+    # Run the HTTPS half ON the host instead of from here. Same TLS, same
+    # Traefik, same routing -- it just drops the client's last mile, which is
+    # where the flakiness lives. From a laptop this gate saw stalls of ten and
+    # thirty seconds and an occasional empty body; from the host, 200 requests
+    # ran with a median of 0.08s and nothing over one second. The Go bkn
+    # behind the same Traefik stalled too, which is what ruled the server out.
+    --on-host) ONHOST=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -91,12 +99,27 @@ run_suite() {
 # fresh database cannot satisfy. Warm it once, silently.
 (cd "$SP" && SP="$SP" BKN_TEST_URL="$URL" timeout 300 bash t-stripe.sh >/dev/null 2>&1) || true
 
-echo "--- over HTTPS, against the instance ---"
-# Serial on purpose: the suites share seeded fixtures, so two at once against
-# one instance produce numbers that mean nothing.
-for s in t-store t-access t-kv t-auth t-files t-forms t-runtime t-stripe t-cms t-headless; do
-  run_suite "$s"
-done
+SUITE_LIST="t-store t-access t-kv t-auth t-files t-forms t-runtime t-stripe t-cms t-headless"
+
+if [ "$ONHOST" = "1" ]; then
+  echo "--- over HTTPS, from the host (client last mile excluded) ---"
+  tar czf - -C "$SP" . | ssh "$HOST" "rm -rf $REMOTE/harness/suite && mkdir -p $REMOTE/harness/suite && tar xzf - -C $REMOTE/harness/suite"
+  hout=$(ssh "$HOST" "cd $REMOTE/harness/suite && SP=\$PWD BKN_TEST_URL=$URL bash -c '
+    for s in $SUITE_LIST; do
+      printf \"  %-15s \" \"\$s\"
+      timeout 300 bash \$s.sh 2>&1 | tail -1 | sed \"s/^ *//\"
+    done'" 2>&1)
+  echo "$hout"
+  PASS=$((PASS + $(echo "$hout" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | paste -sd+ | bc)))
+  FAIL=$((FAIL + $(echo "$hout" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | paste -sd+ | bc)))
+else
+  echo "--- over HTTPS, against the instance ---"
+  # Serial on purpose: the suites share seeded fixtures, so two at once against
+  # one instance produce numbers that mean nothing.
+  for s in $SUITE_LIST; do
+    run_suite "$s"
+  done
+fi
 
 echo
 echo "--- on the host, against the deployed binary ---"

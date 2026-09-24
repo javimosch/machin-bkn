@@ -143,6 +143,17 @@ takes a lock, because two gate runs against one instance share seeded
 fixtures and fail in a way that looks like real bugs rather than a collision
 (`$append concatenates: got cdabcd want abcd`).
 
+Use `--on-host` for a result you intend to trust. Run from a laptop the gate
+flakes -- `t-access` gave 31/31, 16/15, 28/3 and 30/1 on consecutive runs --
+and the cause is the client's last mile, not this build. The proximate symptom
+is an empty response body (`JSONDecodeError: Expecting value ... char 0`),
+which cascades when it lands on a request that yields a token or an id. Two
+controls settled it: the **Go** bkn behind the same Traefik stalled worse (two
+30-second timeouts in 200 requests), and the same probe run **from the host**
+was 200/200 with a median of 0.081s and nothing over a second. When a
+distributed test flakes, probe a second implementation and a second vantage
+point before blaming the code under test.
+
 Fixture setup for the gate is `test/seed-fixtures.sh`; without it the suites
 fail for the wrong reasons entirely — see the runbook below.
 

@@ -95,14 +95,21 @@ cd ~/ai/bkn/test
 SP=$PWD BKN_TEST_URL=https://machin-bkn.vps1.intrane.fr bash t-store.sh
 ```
 
-`./test/deploy-gate.sh` runs the whole 191 against it in one command, in two
-parts: 172 over HTTPS against the instance, and `t-scriptaccess`'s 19 on the
-host against the deployed binary. That suite starts its own server with its
+`./test/deploy-gate.sh --on-host` runs the whole **191** against it in one
+command, in two parts: 172 over HTTPS against the instance, and
+`t-scriptaccess`'s 19 against the deployed binary. That suite starts its own server with its
 own throwaway database, because a script can only be created by the CLI on
 the machine holding the data — running it against the live instance would
 mean leaving a publicly-runnable fixture script on a public host, and its
 last act closes a script it opened, so the gate would mutate the deployment
 on every run.
+
+`--on-host` ships the suite to the server and runs the HTTPS half from there.
+Same TLS, same Traefik, same routing — it only drops the client's last mile,
+which is where the flakiness lives. Run from a laptop this gate saw stalls of
+ten and thirty seconds and the odd empty body; from the host, 200 requests ran
+with a median of 0.08s and nothing over a second. The Go bkn behind the same
+Traefik stalled too, which is what ruled the server out.
 
 It holds the test fixtures and nothing else, every admin route is behind a
 token, and it binds the host's docker bridge rather than a public address —
