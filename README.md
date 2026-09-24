@@ -122,3 +122,7 @@ vendor/             QuickJS + the C bridge
 contract/           bkn's published contract — the ONLY legitimate source
 test/               unit mains, the concurrency harness, seed-fixtures.sh
 ```
+
+## License
+
+MIT, the same as [bkn](https://github.com/javimosch/bkn).
