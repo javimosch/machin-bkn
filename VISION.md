@@ -1,5 +1,10 @@
 # machin-bkn — Vision
 
+**The vision below is [bkn](https://github.com/javimosch/bkn)'s**, restated here
+because it is the thing this repo exists to check. machin-bkn has no product
+ambition of its own — see [This repo](#this-repo) at the bottom for what it is
+actually for.
+
 ## North star
 
 **A backend you own, small enough to read, that outlives the tool that wrote it.**
@@ -22,9 +27,9 @@ sandboxed JS runtime as the extension point instead of compiled hooks. That keep
 the core small enough that one person can read it, and puts the parts that change
 often in a file you can edit without a compiler.
 
-The evidence, not the hope: nine domains of an 85k-line Node/Express/Mongo
-backend moved onto bkn as roughly 1,700 lines of scripts, with almost nothing
-leaking back into Go.
+The evidence, not the hope: nine domains that were whole services in a
+production Node/Express/Mongo backend are roughly 1,700 lines of scripts there,
+with almost nothing leaking back into Go.
 
 ## Why this shape
 
@@ -90,7 +95,7 @@ job is to keep the first one honest.
 
 It was written clean-room in [machin](https://github.com/javimosch/machin) (MFL)
 from the published contract and the observable CLI/HTTP surface — never from
-bkn's Go source — and it passes bkn's 113-assertion live suite unmodified. That
+bkn's Go source — and it passes bkn's live suite unmodified — 191 assertions as of this writing. That
 is what turns "the contract is the product" from a slogan into a checkable
 claim: a specification only one codebase can satisfy is a description of that
 codebase.

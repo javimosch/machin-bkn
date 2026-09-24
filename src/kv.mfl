@@ -81,9 +81,9 @@ func encryptionKey() (key, ok) {
 // add a key, point the id at it, run `kv rekey`. Every value keeps the id it
 // was sealed under until it is rewritten, so nothing has to stop.
 //
-// A lone BKN_ENCRYPTION_KEY always stamps "v1" -- the format the Node backend
-// wrote -- so two different single keys both claim v1 and rekey cannot tell
-// them apart. That is why the keys form exists.
+// A lone BKN_ENCRYPTION_KEY always stamps "v1" -- the format written before
+// key ids existed -- so two different single keys both claim v1 and rekey
+// cannot tell them apart. That is why the keys form exists.
 
 func defaultKeyID() (s) { s = "v1" }
 
