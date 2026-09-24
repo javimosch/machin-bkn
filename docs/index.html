@@ -196,6 +196,48 @@ curl -s https://machin-bkn.vps1.intrane.fr/guide | jq .guide.one_liner
 cd ~/ai/bkn/test
 SP=$PWD BKN_TEST_URL=https://machin-bkn.vps1.intrane.fr bash t-store.sh</div>
 
+<p><code>./test/deploy-gate.sh --on-host</code> runs all <strong>191</strong>
+against that deployment in one command, and answers with a number rather than
+a wall of output:</p>
+
+<div class="arch">=== machin-bkn deploy gate ===
+--- over HTTPS, from the host (client last mile excluded) ---
+  t-store  <b>36</b> · t-access <b>31</b> · t-kv  <b>7</b> · t-auth <b>22</b> · t-files    <b>12</b>
+  t-forms  <b>11</b> · t-runtime <b>14</b> · t-stripe <b>10</b> · t-cms <b>15</b> · t-headless <b>14</b>
+--- on the host, against the deployed binary ---
+  t-scriptaccess  <b>19</b>
+
+=== <b>191 passed, 0 failed</b> ===</div>
+
+<p>Two parts, because <code>t-scriptaccess</code> starts its own server on its
+own throwaway database: a script can only be created by the CLI on the machine
+holding the data, so running it against the live instance would mean leaving a
+publicly-runnable fixture script on a public host — and its last act closes a
+script it opened, so the gate would rewrite the deployment every time. The
+claim is therefore exact: the <em>instance</em> answers 172 over HTTPS and the
+<em>binary</em> passes the other 19.</p>
+
+<div class="notice" style="border-left-color:var(--gold);background:#f5ead0">
+  <strong>Why <code>--on-host</code>, and the mistake it came from.</strong>
+  Run from a laptop this gate flakes: <code>t-access</code> gave 31/31, 16/15,
+  28/3 and 30/1 on consecutive runs. The symptom is an empty response
+  <em>body</em> rather than an error status, and when the empty one lands on a
+  request that yields a token or a record id, every later assertion fails with
+  it — which is why the count swings between one and fifteen. It looks exactly
+  like a protocol bug, and I had a tidy explanation ready.
+  <br><br>
+  Two controls killed it. The <strong>Go</strong> bkn behind the same proxy
+  stalled worse — two thirty-second timeouts in 200 requests. And the same
+  probe run <strong>from the host</strong> was 200/200, median 0.081s, nothing
+  over a second. TLS, the proxy, the routing and both implementations were
+  fine; the client's last mile was not. <code>--on-host</code> runs the HTTPS
+  half from the server: same TLS, same proxy, same routing, minus the flaky
+  hop.
+  <br><br>
+  When a distributed test flakes, probe a second implementation and a second
+  vantage point before blaming the code under test.
+</div>
+
 <p>To run it against your own build instead, seed the fixtures first or the
 score means nothing:</p>
 
@@ -211,9 +253,8 @@ SP=$PWD BKN_TEST_URL=http://127.0.0.1:7799 bash t-store.sh
 ./test/auth-cli.sh bin/bkn     <i># sessions, rotation, revocation</i>
 ./test/cli-surface.sh bin/bkn  <i># store, kv, events, files, locks, cron, hooks, scripts</i></div>
 
-<p><code>t-scriptaccess.sh</code> starts its own instance, because a script can only be
-created by the CLI on the machine holding the data — point it at the binary with
-<code>BKN_BIN</code>.</p>
+<p>And <code>t-scriptaccess.sh</code>, which owns its own server for the reason
+above &mdash; point it at the binary with <code>BKN_BIN</code>.</p>
 
 <h2>Conformance</h2>
 
