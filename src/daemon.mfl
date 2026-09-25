@@ -29,8 +29,38 @@ func isLoopback(host) (yes) {
   if host == "::1" { yes = true }
 }
 
+// Where the shutdown token and the daemon log live.
+//
+// HOME is NOT set for a systemd service, so `env("HOME") + "/.bkn"` quietly
+// resolved to `/.bkn` -- the filesystem root -- on the first real deployment.
+// It worked, in a directory no operator would think to look in and that a
+// human running `daemon stop` would never agree on.
+//
+// The datastore's own directory is the better anchor: the service and anyone
+// invoking the CLI against it already share BKN_DATA, so they agree on where
+// the token is without either of them knowing the other's HOME.
 func bknHome() (d) {
-  d = env("HOME") + "/.bkn"
+  h := env("BKN_HOME")
+  if h != "" { d = h  return }
+  home := env("HOME")
+  if home != "" { d = home + "/.bkn"  return }
+  data := env("BKN_DATA")
+  if data != "" {
+    cut := lastSlash(data)
+    if cut > 0 { d = substr(data, 0, cut)  return }
+  }
+  d = ".bkn"
+}
+
+// MFL has no last_index; a relative BKN_DATA with no slash falls through to
+// the "." case above, which is what a bare filename means anyway.
+func lastSlash(s) (n) {
+  n = -1
+  i := 0
+  while i < len(s) {
+    if substr(s, i, i+1) == "/" { n = i }
+    i = i + 1
+  }
 }
 
 func shutdownTokenPath() (p) { p = bknHome() + "/shutdown.token" }

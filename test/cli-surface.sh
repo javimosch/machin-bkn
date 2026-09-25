@@ -236,6 +236,18 @@ SERR=$(timeout 3 "$M" serve --port $((SPORT+1)) 2>&1 1>/dev/null | head -1)
 chk "serve says nothing on stdout" "${SOUT:-empty}" "empty"
 chk "and announces on stderr"      "$(echo "$SERR" | grep -c 'listening on http://')" "1"
 
+# HOME is not set for a systemd service, and the first deployment of this
+# wrote its shutdown token to /.bkn -- the filesystem ROOT -- because
+# `$HOME + "/.bkn"` with an empty HOME is `/.bkn`. It worked, somewhere no
+# operator would look and no `daemon stop` would agree on.
+HT=$(mktemp -d)
+env -i PATH=/usr/bin:/bin BKN_DATA="$HT/x.db" BKN_ADMIN_TOKEN=t \
+    BKN_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef \
+    timeout 3 "$M" serve --host 127.0.0.2 --port $((25000 + RANDOM % 9000)) >/dev/null 2>&1
+chk "no HOME: token sits by the db" "$([ -f "$HT/shutdown.token" ] && echo yes || echo no)" "yes"
+chk "and never at the filesystem root" "$([ -e /.bkn/shutdown.token ] && echo leaked || echo clean)" "clean"
+rm -rf "$HT"
+
 # --- the output contract -----------------------------------------------------
 # spec-output.md: "The exit code MUST match the error.code field in the typed
 # error body." An agent reads one and branches on the other, so a disagreement
