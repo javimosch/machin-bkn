@@ -154,7 +154,7 @@ that exist to ship and support a *product* are deliberately out of scope.
 |---|---|
 | cli-output-spec | **yes** — stdout = data, `help-json`, a `version` on every success, and typed errors whose `code` equals the exit code (`80/85/92/95/110`) with `type`, `recoverable` and suggestions |
 | cli-guide-spec | **yes** — `bkn guide [--human]` (embedded, never fetched), `GET /guide`, `GET /llms.txt` |
-| cli-daemon-spec | partial — `serve --host --port` (loopback default), `GET /_health`; no `/_shutdown`, no `daemon start\|stop\|status` |
+| cli-daemon-spec | **yes** — `serve --host --port` (loopback default, announced on stderr), `GET /_health` with a real pid, `POST /_shutdown` that answers before exiting and is token-gated off-loopback, idempotent `daemon start\|stop\|status` |
 | cli-update-spec | **out of scope** — nothing here is distributed, so there is nothing to self-update |
 | cli-feedback-spec | **out of scope** — feedback on the contract belongs on bkn |
 | cli-telemetry-spec | **out of scope** — a test instrument counting its own runs measures nothing |

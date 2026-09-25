@@ -770,6 +770,13 @@ func countArray(db, arr) (n) {
   if e == "" { n = int(parse(v, 0)) }
 }
 
+// A bounded grace period, not a guess: long enough for the reply to reach the
+// client, short enough that `daemon stop` is not left waiting on it.
+func shutdownAfterReply() {
+  sleep(250)
+  exit(0)
+}
+
 func handle(req) (res) {
   q := parseQuery(req.path)
   segs := segments(req.path)
@@ -791,12 +798,33 @@ func handle(req) (res) {
       res = jsonRes("200 OK", "{\"ok\":true,\"tool\":\"bkn\",\"tool_version\":" + jsonQuote(toolVersion()) + ",\"version\":\"1.0\"}")
       return
     }
+    if segs[0] == "_shutdown" {
+      if req.method != "POST" { res = errRes("405 Method Not Allowed", "method_not_allowed", "stop the daemon with POST")  return }
+      // Off-loopback this is a kill switch anyone could press, so it needs the
+      // token minted at startup. On loopback only a co-resident process can
+      // reach it, which is the boundary the spec draws -- and a tool cannot
+      // ship --host 0.0.0.0 and an ungated /_shutdown at the same time.
+      if !isLoopback(gHost) {
+        want := readShutdownToken()
+        if want == "" { res = errRes("403 Forbidden", "not_authenticated", "no shutdown token is configured")  return }
+        if !constantTimeEqual(want, bearer(req)) {
+          res = errRes("403 Forbidden", "not_authenticated", "a daemon bound off-loopback needs its shutdown token")
+          return
+        }
+      }
+      // Answer FIRST. Exiting inside the handler closes the socket before the
+      // response is written, and the caller sees a reset instead of a clean
+      // 200 -- so the exit waits for the write to drain.
+      go shutdownAfterReply()
+      res = jsonRes("200 OK", "{\"ok\":true,\"stopping\":true}")
+      return
+    }
     if segs[0] == "_health" {
       if sqlite_query(gDB, "SELECT 1 AS ok") == "[]" {
         res = jsonRes("503 Service Unavailable", "{\"ok\":false,\"service\":\"bkn\",\"reason\":\"datastore unreachable\"}")
         return
       }
-      res = jsonRes("200 OK", "{\"ok\":true,\"service\":\"bkn\",\"pid\":0}")
+      res = jsonRes("200 OK", "{\"ok\":true,\"service\":\"bkn\",\"pid\":" + selfPID() + "}")
       return
     }
   }
@@ -917,11 +945,20 @@ func main() {
   // exited 0. A stale server then kept serving an old database while a test run
   // believed it was talking to the new one -- which is exactly how a green
   // suite turned into 13 mysterious failures.
-  println("[serve] starting on http://" + gHost + ":" + str(port))
-  // serve_on, NOT serve: serve() binds INADDR_ANY, so --host was decorative
+  // Resolve the pid once here, not lazily from a request handler: exec() from
+  // inside a handler goroutine came back empty, and one fork at boot is the
+  // right cost anyway.
+  gPID = selfPID()
+  // Off-loopback the kill switch needs a secret; mint it before the port opens.
+  if !isLoopback(gHost) { mintShutdownToken() }
+  // stderr, not stdout: this is context, not data. An agent scripting
+  // "launch, then poll health" needs the line to exist and to be flushed, and
+  // a JSON consumer needs stdout to stay clean -- hence serve_on_quiet.
+  eprintln("[serve] listening on http://" + gHost + ":" + str(port))
+  // serve_on_quiet, NOT serve: serve() binds INADDR_ANY, so --host was decorative
   // and an operator who asked for 127.0.0.1 or a private address got the whole
   // internet instead. serve_on exits on a bind failure rather than returning.
-  serve_on(gHost, port, func(req) { return handle(req) })
-  println("[serve] could not bind " + gHost + ":" + str(port) + " — is another instance already running?")
+  serve_on_quiet(gHost, port, func(req) { return handle(req) })
+  eprintln("[serve] could not bind " + gHost + ":" + str(port) + " — is another instance already running?")
   exit(75)
 }

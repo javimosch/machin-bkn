@@ -210,6 +210,32 @@ chk "--stdout streams the bytes"  "$(head -c 15 "$WORK/piped.db")" "SQLite forma
 chk "and that stream is a real db" "$(BKN_DATA=$WORK/piped.db "$M" store count shop/items </dev/null | j 'str(d["total"])')" "3"
 chk "no temp file left behind"    "$(( $(ls /tmp/bkn-backup-*.db 2>/dev/null | wc -l) - BEFORE ))" "0"
 
+# --- the daemon lifecycle ---------------------------------------------------
+DPORT=$((23000 + RANDOM % 9000))
+chk "status on a stopped daemon"  "$("$M" daemon status --port $DPORT </dev/null | j 'str(d["daemon"]["running"])')" "False"
+chk "start reports a real pid"    "$("$M" daemon start --port $DPORT </dev/null | j 'str(d["daemon"]["pid"] == int(__import__("subprocess").check_output(["bash","-c","ss -ltnp \"sport = :'"$DPORT"'\" | grep -oE \"pid=[0-9]+\" | head -1 | cut -d= -f2"]).strip()))')" "True"
+# /_health's pid is what an operator uses to find the process; 0 is useless
+chk "health agrees with it"       "$(curl -s "http://127.0.0.1:$DPORT/_health" | j 'str(d["pid"] > 0)')" "True"
+# idempotent: a second start must not race a second process for the port
+"$M" daemon start --port $DPORT </dev/null >/dev/null 2>&1
+chk "start twice, one listener"   "$(ss -ltn "sport = :$DPORT" 2>/dev/null | grep -c LISTEN)" "1"
+# the response must complete before the process goes, or the caller sees a reset
+chk "shutdown answers before dying" "$(curl -s -X POST "http://127.0.0.1:$DPORT/_shutdown" | j 'str(d["stopping"])')" "True"
+sleep 1
+chk "and it actually stopped"     "$(curl -s -m 2 "http://127.0.0.1:$DPORT/_health" >/dev/null 2>&1 && echo up || echo down)" "down"
+chk "stop is a no-op when stopped" "$("$M" daemon stop --port $DPORT </dev/null | j 'str(d["was_running"])')" "False"
+chk "stopping twice is not an error" "$(rc "$M" daemon stop --port $DPORT)" "0"
+"$M" daemon start --port $DPORT </dev/null >/dev/null 2>&1
+chk "stop reports what it did"    "$("$M" daemon stop --port $DPORT </dev/null | j 'str(d["stopped"])+"/"+str(d["was_running"])')" "True/True"
+
+# The serve line is context, not data: an agent that pipes stdout to a JSON
+# parser must not be handed a log line.
+SPORT=$((24000 + RANDOM % 9000))
+SOUT=$(timeout 3 "$M" serve --port $SPORT 2>/dev/null | head -c 40)
+SERR=$(timeout 3 "$M" serve --port $((SPORT+1)) 2>&1 1>/dev/null | head -1)
+chk "serve says nothing on stdout" "${SOUT:-empty}" "empty"
+chk "and announces on stderr"      "$(echo "$SERR" | grep -c 'listening on http://')" "1"
+
 # --- the output contract -----------------------------------------------------
 # spec-output.md: "The exit code MUST match the error.code field in the typed
 # error body." An agent reads one and branches on the other, so a disagreement

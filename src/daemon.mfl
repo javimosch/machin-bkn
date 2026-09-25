@@ -1,0 +1,147 @@
+// The daemon lifecycle convention — contract/spec-daemon.md.
+//
+// Shapes here follow what bkn ACTUALLY answers rather than the spec's literal
+// examples, because this build exists to be behaviourally interchangeable with
+// that one. Where the two disagree, notes/ records it; reproducing bkn is the
+// job, and a divergence found is the point rather than a thing to paper over.
+
+var gPID = ""
+
+// machin has no getpid, and read_file over /proc returns nothing (machin#668),
+// so ask a child shell what its parent is. Cached: one fork at startup, never
+// again.
+func selfPID() (p) {
+  if gPID != "" { p = gPID  return }
+  // exec already runs the command through a shell, so `sh -c 'echo $PPID'`
+  // reports THAT shell's pid, not ours -- it came back five higher than the
+  // listening process. One less layer and $PPID is the real answer.
+  code, out, _ := exec("echo $PPID")
+  p = "0"
+  if code == 0 { p = trim(out) }
+  if p == "" { p = "0" }
+  gPID = p
+}
+
+func isLoopback(host) (yes) {
+  yes = false
+  if host == "127.0.0.1" { yes = true }
+  if host == "localhost" { yes = true }
+  if host == "::1" { yes = true }
+}
+
+func bknHome() (d) {
+  d = env("HOME") + "/.bkn"
+}
+
+func shutdownTokenPath() (p) { p = bknHome() + "/shutdown.token" }
+
+// A daemon bound off-loopback must not expose an unauthenticated kill switch:
+// the same code that is harmless on 127.0.0.1 becomes a denial-of-service
+// button the moment it is reachable. The token is minted per serve and left
+// where this CLI's own `daemon stop` can read it.
+func mintShutdownToken() (tok) {
+  tok = to_hex(rand_bytes(24))
+  _, _, _ = exec("mkdir -p " + bknHome())
+  write_file(shutdownTokenPath(), tok)
+  // machin has no chmod; the file holds a kill switch, so it gets 0600 the
+  // only way available here.
+  _, _, _ = exec("chmod 600 " + shutdownTokenPath())
+}
+
+func readShutdownToken() (tok) {
+  tok = trim(read_file(shutdownTokenPath()))
+}
+
+// --- the daemon verbs ------------------------------------------------------
+
+func healthURL(host, port) (u) { u = "http://" + host + ":" + str(port) + "/_health" }
+
+// Probing means asking the health endpoint, never a pid file: a pid that
+// exists says a process exists, not that it is serving this port.
+func daemonProbe(host, port) (running, pid) {
+  running = false
+  pid = ""
+  code, out, _ := exec("curl -s -m 2 " + healthURL(host, port))
+  if code != 0 { return }
+  if index(out, "\"ok\":true") < 0 { return }
+  running = true
+  pid = jsonField(out, ".pid")
+}
+
+// Poll rather than sleep: a bad config makes the child exit at once, and a
+// fixed sleep either wastes the common case or races a slow start.
+func waitHealthy(host, port, want) (ok) {
+  ok = false
+  i := 0
+  while i < 50 {
+    running, _ := daemonProbe(host, port)
+    if running == want { ok = true  return }
+    sleep(100)
+    i = i + 1
+  }
+}
+
+func daemonJSON(running, host, port, pid) (s) {
+  s = "{\"running\":"
+  if running { s = s + "true" } else { s = s + "false" }
+  s = s + ",\"host\":" + jsonQuote(host) + ",\"port\":" + str(port)
+  if pid != "" { s = s + ",\"pid\":" + pid }
+  s = s + ",\"url\":" + jsonQuote("http://" + host + ":" + str(port)) + "}"
+}
+
+func daemonLogPath() (p) { p = bknHome() + "/daemon.log" }
+
+func daemonStart(self, host, port) (out, code) {
+  code = 0
+  running, pid := daemonProbe(host, port)
+  // Idempotent: something already answering on this host:port must not be
+  // raced by a second process fighting for the same socket.
+  if running {
+    out = "{\"ok\":true,\"daemon\":" + daemonJSON(true, host, port, pid) + ",\"log\":" + jsonQuote(daemonLogPath()) + "}"
+    return
+  }
+  _, _, _ = exec("mkdir -p " + bknHome())
+  // Detached: redirected stdio and a life of its own, so the daemon outlives
+  // the CLI that started it.
+  _, _, _ = exec("sh -c 'nohup " + self + " serve --host " + host + " --port " + str(port) +
+       " >> " + daemonLogPath() + " 2>&1 & '")
+  if !waitHealthy(host, port, true) {
+    _, tail, _ := exec("tail -n 5 " + daemonLogPath())
+    out = cliErr(100, "daemon_start_failed", "the daemon did not become healthy: " + trim(tail))
+    code = 100
+    return
+  }
+  _, newPID := daemonProbe(host, port)
+  out = "{\"ok\":true,\"daemon\":" + daemonJSON(true, host, port, newPID) + ",\"log\":" + jsonQuote(daemonLogPath()) + "}"
+}
+
+func daemonStop(host, port) (out, code) {
+  code = 0
+  running, _ := daemonProbe(host, port)
+  // Stopping something already stopped is not an error: the caller's goal is
+  // that it is not running, and it is not.
+  if !running {
+    out = "{\"ok\":true,\"stopped\":false,\"was_running\":false}"
+    return
+  }
+  auth := ""
+  if !isLoopback(host) {
+    tok := readShutdownToken()
+    if tok != "" { auth = " -H 'Authorization: Bearer " + tok + "'" }
+  }
+  _, _, _ = exec("curl -s -m 5 -X POST" + auth + " http://" + host + ":" + str(port) + "/_shutdown")
+  // Confirm it actually went: a 200 says the request was accepted, not that
+  // the process has gone.
+  if !waitHealthy(host, port, false) {
+    out = cliErr(110, "daemon_stop_failed", "the daemon is still answering after its shutdown grace period")
+    code = 110
+    return
+  }
+  out = "{\"ok\":true,\"stopped\":true,\"was_running\":true}"
+}
+
+func daemonStatus(host, port) (out, code) {
+  code = 0
+  running, pid := daemonProbe(host, port)
+  out = "{\"ok\":true,\"daemon\":" + daemonJSON(running, host, port, pid) + "}"
+}

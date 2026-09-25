@@ -259,14 +259,14 @@ above &mdash; point it at the binary with <code>BKN_BIN</code>.</p>
 <h2>Conformance</h2>
 
 <p>Built to the <a href="https://cli-specs.intrane.fr">agent-first CLI spec family</a>.
-This is a verification instrument rather than a distributed tool, so the specs that
-exist to ship and support a <em>product</em> are deliberately out of scope.</p>
+This is a verification instrument rather than a distributed tool, so the three specs
+that exist to ship and support a <em>product</em> are deliberately out of scope.</p>
 
 <table>
 <tr><th>Spec</th><th>Status</th></tr>
 <tr><td>cli-guide-spec</td><td><strong>Yes</strong> — <code>bkn guide [--human]</code> (embedded, never fetched), <code>GET /guide</code>, <code>GET /llms.txt</code></td></tr>
 <tr><td>cli-output-spec</td><td><strong>Yes</strong> &mdash; stdout = data, <code>help-json</code>, a <code>version</code> on every success, and typed errors whose <code>code</code> equals the exit code: <code>80</code> invalid/unknown, <code>85</code> validation, <code>92</code> not found, <code>95</code> already exists, <code>110</code> internal, each with <code>type</code>, <code>recoverable</code> and, where there is one, the command that fixes it</td></tr>
-<tr><td>cli-daemon-spec</td><td>Partial — <code>serve --host --port</code> (loopback default), <code>GET /_health</code>; no <code>/_shutdown</code>, no <code>daemon</code> verbs</td></tr>
+<tr><td>cli-daemon-spec</td><td><strong>Yes</strong> &mdash; <code>serve --host --port</code> (loopback default, announced on stderr), <code>GET /_health</code> with a real pid, <code>POST /_shutdown</code> that answers before it exits and needs a token when bound off-loopback, and idempotent <code>daemon start|stop|status</code></td></tr>
 <tr><td>cli-update-spec</td><td><em>Out of scope</em> — nothing here is distributed, so there is nothing to self-update</td></tr>
 <tr><td>cli-feedback-spec</td><td><em>Out of scope</em> — feedback on the contract belongs on bkn</td></tr>
 <tr><td>cli-telemetry-spec</td><td><em>Out of scope</em> — a test instrument counting its own runs measures nothing</td></tr>
