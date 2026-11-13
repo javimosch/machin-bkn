@@ -136,6 +136,21 @@ func authStatus(err) (status, kind) {
   if err == "user is not a member of that organization" { status = "403 Forbidden"  kind = "not_a_member" }
   if err == "token has expired" { status = "401 Unauthorized"  kind = "token_expired" }
   if err == "token is malformed or its signature does not match" { status = "401 Unauthorized"  kind = "bad_token" }
+  if err == "a user with that email already exists" { status = "409 Conflict"  kind = "already_exists" }
+  if err == "an organization with that slug already exists" { status = "409 Conflict"  kind = "already_exists" }
+  if err == "email is not valid" { status = "400 Bad Request"  kind = "validation_error" }
+  if err == "password must be at least 8 characters" { status = "400 Bad Request"  kind = "validation_error" }
+  if err == "role must be one of: user, admin" { status = "400 Bad Request"  kind = "validation_error" }
+  if err == "role must be one of: owner, admin, member" { status = "400 Bad Request"  kind = "validation_error" }
+  if err == "role must be user or admin" { status = "400 Bad Request"  kind = "validation_error" }
+}
+
+// memberJSON renders one membership row in the shape the org/member routes
+// answer with — the same fields membershipsOf and listMembers emit.
+func memberJSON(orgID, orgSlug, userID, userEmail, role, createdAt) (out) {
+  out = "{\"org_id\":" + jsonQuote(orgID) + ",\"org_slug\":" + jsonQuote(orgSlug) +
+    ",\"user_id\":" + jsonQuote(userID) + ",\"user_email\":" + jsonQuote(userEmail) +
+    ",\"role\":" + jsonQuote(role) + ",\"created_at\":" + jsonQuote(createdAt) + "}"
 }
 
 func authRoutes(req, q, segs) (res) {
@@ -221,6 +236,134 @@ func authRoutes(req, q, segs) (res) {
     return
   }
 
+  // Self-service registration: a deployment property (BKN_OPEN_SIGNUP=1),
+  // not a caller's privilege. The role field is ignored on purpose — an open
+  // endpoint that honored it would be an admin-account vending machine.
+  if leaf == "register" {
+    if req.method != "POST" { res = errRes("405 Method Not Allowed", "method_not_allowed", "use POST")  return }
+    if env("BKN_OPEN_SIGNUP") != "1" {
+      res = errRes("403 Forbidden", "forbidden", "self-service registration is disabled")
+      return
+    }
+    created, cerr := createUser(gDB, jsonField(req.body, ".email"), jsonField(req.body, ".password"), jsonField(req.body, ".name"), "user")
+    if cerr != "" {
+      st, kind := authStatus(cerr)
+      res = errRes(st, kind, cerr)
+      return
+    }
+    u, ufound := findUser(gDB, normalizeEmail(jsonField(req.body, ".email")))
+    if !ufound { res = errRes("500 Internal Server Error", "internal_error", "user vanished after create")  return }
+    tokens, terr := issueTokens(gDB, u, "")
+    if terr != "" {
+      st, kind := authStatus(terr)
+      res = errRes(st, kind, terr)
+      return
+    }
+    res = jsonRes("200 OK", "{\"ok\":true,\"tokens\":" + tokens + ",\"user\":" + created + "}")
+    return
+  }
+
+  // Orgs are three-tiered: the admin token sees everything; a signed-in user
+  // creates workspaces (becoming owner) and manages the members of orgs they
+  // administer; everyone else gets 401. Membership is checked against the
+  // database, not the token's org claim — a user can administer an org their
+  // token is not currently scoped to.
+  if leaf == "orgs" {
+    isAdmin := authed(req, gAdmin, gHost)
+    caller := ""
+    if !isAdmin {
+      tok := bearer(req)
+      if tok == "" { res = errRes("401 Unauthorized", "not_authenticated", "missing bearer access token")  return }
+      whoJ, _, werr := meFromToken(gDB, tok)
+      if werr != "" { res = errRes("401 Unauthorized", "not_authenticated", werr)  return }
+      caller = jsonField(whoJ, ".id")
+    }
+    if len(segs) == 3 {
+      if req.method == "POST" {
+        org, oerr := createOrg(gDB, jsonField(req.body, ".slug"), jsonField(req.body, ".name"))
+        if oerr != "" {
+          st, kind := authStatus(oerr)
+          res = errRes(st, kind, oerr)
+          return
+        }
+        if isAdmin {
+          res = jsonRes("201 Created", "{\"ok\":true,\"org\":" + org + "}")
+          return
+        }
+        // The creator becomes owner — that is the "create a workspace" move.
+        slug := jsonField(org, ".slug")
+        merr := addMember(gDB, slug, caller, "owner")
+        if merr != "" {
+          st, kind := authStatus(merr)
+          res = errRes(st, kind, merr)
+          return
+        }
+        cu, _ := findUser(gDB, caller)
+        stamp := nowStamp()
+        mem := memberJSON(jsonField(org, ".id"), slug, cu.id, cu.email, "owner", stamp)
+        res = jsonRes("201 Created", "{\"ok\":true,\"org\":" + org + ",\"membership\":" + mem + "}")
+        return
+      }
+      if req.method != "GET" { res = errRes("405 Method Not Allowed", "method_not_allowed", "use GET or POST")  return }
+      if !isAdmin { res = errRes("403 Forbidden", "forbidden", "missing or invalid bearer token")  return }
+      orgs := listOrgs(gDB)
+      res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, orgs)) + ",\"orgs\":" + orgs + "}")
+      return
+    }
+    // /v1/auth/orgs/<slug>/members[/<user>] — membership is addressed under
+    // its org rather than as a top-level resource.
+    if len(segs) >= 5 && segs[4] == "members" {
+      o, orgFound := findOrg(gDB, segs[3])
+      if !orgFound { res = errRes("404 Not Found", "not_found", "organization not found")  return }
+      role := "admin"
+      if !isAdmin {
+        r, member := membershipRole(gDB, o.id, caller)
+        if !member { res = errRes("403 Forbidden", "forbidden", "you need to be member of this organization")  return }
+        role = r
+      }
+      canWrite := isAdmin || role == "owner" || role == "admin"
+      if req.method == "GET" && len(segs) == 5 {
+        members, lerr := listMembers(gDB, segs[3])
+        if lerr != "" { res = errRes("404 Not Found", "not_found", lerr)  return }
+        res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, members)) + ",\"members\":" + members + "}")
+        return
+      }
+      if req.method == "POST" && len(segs) == 5 {
+        if !canWrite { res = errRes("403 Forbidden", "forbidden", "you need to be admin of this organization")  return }
+        uref := jsonField(req.body, ".user")
+        mrole := jsonField(req.body, ".role")
+        merr := addMember(gDB, segs[3], uref, mrole)
+        if merr != "" {
+          st, kind := authStatus(merr)
+          res = errRes(st, kind, merr)
+          return
+        }
+        tu, tfound := findUser(gDB, uref)
+        if !tfound { res = errRes("404 Not Found", "not_found", "user not found")  return }
+        if mrole == "" { mrole = "member" }
+        mem := memberJSON(o.id, o.slug, tu.id, tu.email, mrole, nowStamp())
+        res = jsonRes("201 Created", "{\"ok\":true,\"membership\":" + mem + "}")
+        return
+      }
+      if req.method == "DELETE" && len(segs) == 6 {
+        if !canWrite { res = errRes("403 Forbidden", "forbidden", "you need to be admin of this organization")  return }
+        ok, derr := removeMember(gDB, segs[3], segs[5])
+        if derr != "" {
+          st, kind := authStatus(derr)
+          res = errRes(st, kind, derr)
+          return
+        }
+        _ = ok
+        res = jsonRes("200 OK", "{\"ok\":true,\"removed\":" + jsonQuote(segs[5]) + "}")
+        return
+      }
+      res = errRes("404 Not Found", "not_found", "no such route")
+      return
+    }
+    res = errRes("404 Not Found", "not_found", "no such route")
+    return
+  }
+
   // Administering identities is operator work, not user work.
   if !authed(req, gAdmin, gHost) {
     res = errRes("403 Forbidden", "not_authenticated", "missing or invalid bearer token")
@@ -264,41 +407,6 @@ func authRoutes(req, q, segs) (res) {
     }
     users, count := listUsers(gDB, qInt(q, "limit", 50), qInt(q, "offset", 0))
     res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(count) + ",\"users\":" + users + "}")
-    return
-  }
-  if leaf == "orgs" {
-    // /v1/auth/orgs/<slug>/members — membership is addressed under its org
-    // rather than as a top-level resource, because it has no meaning without one.
-    if len(segs) >= 5 {
-      if segs[4] == "members" {
-        if req.method == "POST" {
-          merr := addMember(gDB, segs[3], jsonField(req.body, ".user"), jsonField(req.body, ".role"))
-          if merr != "" {
-            st, kind := authStatus(merr)
-            res = errRes(st, kind, merr)
-            return
-          }
-          res = jsonRes("201 Created", "{\"ok\":true,\"added\":true}")
-          return
-        }
-        members, lerr := listMembers(gDB, segs[3])
-        if lerr != "" { res = errRes("404 Not Found", "not_found", lerr)  return }
-        res = jsonRes("200 OK", "{\"ok\":true,\"members\":" + members + "}")
-        return
-      }
-    }
-    if req.method == "POST" && len(segs) == 3 {
-      org, oerr := createOrg(gDB, jsonField(req.body, ".slug"), jsonField(req.body, ".name"))
-      if oerr != "" {
-        st, kind := authStatus(oerr)
-        res = errRes(st, kind, oerr)
-        return
-      }
-      res = jsonRes("201 Created", "{\"ok\":true,\"org\":" + org + "}")
-      return
-    }
-    orgs := listOrgs(gDB)
-    res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(countArray(gDB, orgs)) + ",\"orgs\":" + orgs + "}")
     return
   }
   res = errRes("404 Not Found", "not_found", "no such route")
