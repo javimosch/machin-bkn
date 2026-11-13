@@ -62,13 +62,17 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
       // is a 404, not a silent takeover.
       body := req.body
       if dec.scopeField != "" {
-        if qGet(q, "id") != "" {
-          existing, had := getDoc(gDB, ns, coll, qGet(q, "id"))
-          if had {
-            if jsonField(existing, "." + dec.scopeField) != dec.scopeValue {
-              res = errRes("404 Not Found", "not_found", "record not found")
-              return
-            }
+        // Scope-check the id the upsert will actually resolve to: ?id= wins,
+        // then the body's own id — the same precedence resolveID applies.
+        // Checking only ?id= let a body-id upsert overwrite a stranger's
+        // record and re-stamp it into the attacker's scope.
+        upsertID := qGet(q, "id")
+        if upsertID == "" { upsertID = jsonField(body, ".id") }
+        if upsertID != "" {
+          existing, had := getDoc(gDB, ns, coll, upsertID)
+          if had && jsonField(existing, "." + dec.scopeField) != dec.scopeValue {
+            res = errRes("404 Not Found", "not_found", "record not found")
+            return
           }
         }
         stamped := sqlite_query(gDB, "SELECT json_set(?, ?, ?) AS d", []string{body, "$." + dec.scopeField, dec.scopeValue})
