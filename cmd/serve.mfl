@@ -344,6 +344,8 @@ func clientIP(req) (ip) {
 // hooksRoutes is the only unauthenticated write path in the server. A hook
 // hands the request to a script and returns whatever the script decided.
 func hooksRoutes(req, q, segs) (res) {
+  // Only /v1/hooks/<name> exists — the bare prefix has no listing route.
+  if len(segs) < 3 { res = errRes("404 Not Found", "not_found", "no such route")  return }
   name := segs[2]
   h, found := findHook(gDB, name)
   if !found { res = errRes("404 Not Found", "not_found", "no such hook")  return }
@@ -867,7 +869,9 @@ func handle(req) (res) {
     }
   }
 
-  if len(segs) >= 3 {
+  // Store needs at least v1/store/<ns>/<coll> — a bare /v1/store/<x> has no
+  // collection and must 404, not read segs[3] out of bounds.
+  if len(segs) >= 4 {
     if segs[0] == "v1" {
       if segs[1] == "store" {
         // The policy is decided ONCE, here, and handed to the routes as a scope.
