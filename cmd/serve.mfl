@@ -1003,6 +1003,31 @@ func handle(req) (res) {
         }
         storeAcc := accessOf(gDB, segs[2], segs[3])
         dec := decideAccess(gDB, storeAcc, verbFor(req.method, len(segs) >= 5), storeAdmin, storeTok != "", storeSub, storeOrg)
+        // Self-service provisioning: a member whose token carries an org may
+        // declare a collection nobody has declared yet — the suite story is
+        // "signup, install, sync", and requiring the operator to pre-declare
+        // every collection per deployment bricks it. The policy must stay
+        // inside the caller's own scope, and the same ceiling applies when an
+        // org member rewrites a policy they can already write: PUT is gated
+        // by the create verb, so without it a member could provision org
+        // scope and then widen it to public, exposing every tenant's docs.
+        memberPUT := !storeAdmin && storeOrg != "" && req.method == "PUT" && len(segs) == 4
+        if memberPUT {
+          macc := jsonField(req.body, ".access")
+          if macc != "" {
+            aerr := validateAccess(gDB, macc)
+            if aerr != "" { res = errRes("400 Bad Request", "validation_error", aerr)  return }
+            if !orgCompatibleAccess(gDB, macc) {
+              res = errRes("403 Forbidden", "forbidden", "self-service policies cannot reach beyond your organization")
+              return
+            }
+          }
+        }
+        if !dec.allow {
+          if memberPUT && jsonField(req.body, ".access") != "" && !accessDeclared(gDB, storeAcc) {
+            dec = allowUnscoped()
+          }
+        }
         if !dec.allow {
           res = errRes(dec.status, dec.kind, dec.msg)
           return
