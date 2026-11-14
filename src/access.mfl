@@ -73,6 +73,45 @@ func setAccess(db, ns, coll, acc) {
   sqlite_exec(db, "UPDATE collections SET access = ? WHERE ns = ? AND name = ?", []string{acc, ns, coll})
 }
 
+// accessDeclared reports whether a collection has any rules at all. "{}" and
+// a cleared policy are the same thing: nobody has spoken about it, so it is
+// still admin-only — and still claimable by an org member.
+func accessDeclared(db, acc) (declared) {
+  declared = false
+  rules := jsonField(acc, ".rules")
+  if rules == "" { return }
+  rows := sqlite_query(db, "SELECT COUNT(*) AS c FROM json_each(?)", []string{rules})
+  if rows == "[]" { return }
+  v, e := json_get(rows, "[0].c")
+  if e == "" { if int(parse(v, 0)) > 0 { declared = true } }
+}
+
+// orgCompatibleAccess is the ceiling on self-service: a member may declare
+// any policy that cannot reach past their own scope. "org" and "owner" are
+// bounded by the caller's claims and "admin" is narrower still; "user" and
+// "public" would expose the collection across tenants, which is exactly what
+// a member must not be able to declare. Callers run validateAccess first, so
+// every audience seen here is already a known verb audience.
+func orgCompatibleAccess(db, acc) (ok) {
+  ok = false
+  rules := jsonField(acc, ".rules")
+  if rules == "" { return }
+  rows := sqlite_query(db, "SELECT key AS key, value AS val FROM json_each(?)", []string{rules})
+  if rows == "[]" { return }
+  parsed := parse(rows, []RuleRow{})
+  i := 0
+  while i < len(parsed) {
+    a := parsed[i].val
+    good := false
+    if a == "org" { good = true }
+    if a == "owner" { good = true }
+    if a == "admin" { good = true }
+    if !good { return }
+    i = i + 1
+  }
+  ok = true
+}
+
 func accessOf(db, ns, coll) (acc) {
   acc = "{}"
   rows := sqlite_query(db, "SELECT COALESCE(access,'{}') AS a FROM collections WHERE ns = ? AND name = ?", []string{ns, coll})
