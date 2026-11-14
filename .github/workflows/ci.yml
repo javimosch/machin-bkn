@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install static link deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev zlib1g-dev libzstd-dev
+
+      - name: Install machin v0.142.0
+        run: |
+          curl -fsSL -o /tmp/machin \
+            https://github.com/javimosch/machin/releases/download/v0.142.0/machin-v0.142.0-linux-amd64
+          chmod +x /tmp/machin
+          sudo mv /tmp/machin /usr/local/bin/machin
+          echo "MACHIN=/usr/local/bin/machin" >> "$GITHUB_ENV"
+
+      - name: Fetch machin framework (MACHIN_FW)
+        run: |
+          git clone --depth 1 --branch v0.142.0 \
+            https://github.com/javimosch/machin.git /tmp/machin-fw
+          echo "MACHIN_FW=/tmp/machin-fw/framework" >> "$GITHUB_ENV"
+
+      - name: Build bkn binary
+        run: ./build.sh cmd/serve.mfl -o bkn
+
+      - name: Smoke test
+        run: |
+          BKN_DATA=/tmp/bkn-ci.db BKN_PORT=17999 ./bkn &
+          sleep 2
+          curl -fsS http://127.0.0.1:17999/_health
+          kill %1
