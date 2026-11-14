@@ -33,9 +33,10 @@ jobs:
       - name: Build bkn binary
         run: ./build.sh cmd/serve.mfl -o bkn
 
-      - name: Smoke test
+      - name: Test suites (320 assertions)
         run: |
-          BKN_DATA=/tmp/bkn-ci.db BKN_PORT=17999 ./bkn &
-          sleep 2
-          curl -fsS http://127.0.0.1:17999/_health
-          kill %1
+          set -o pipefail
+          for t in auth-cli catalog cli-surface concurrency; do
+            echo "=== $t ==="
+            ./test/$t.sh ./bkn | tail -2
+          done
