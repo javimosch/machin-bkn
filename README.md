@@ -51,6 +51,24 @@ Needs the [machin](https://github.com/javimosch/machin) compiler and
 QuickJS is vendored and linked as a static archive, so the result is a single
 file with no runtime dependencies.
 
+## Release binaries
+
+Each [GitHub release](https://github.com/javimosch/machin-bkn/releases) carries
+prebuilt static `mbkn` binaries for linux/amd64 and linux/arm64 plus a
+`SHA256SUMS.txt` — pushing a `v*` tag runs `.github/workflows/release.yml`,
+which builds both arches on native runners and publishes them.
+
+```sh
+V=v0.1.0
+curl -fsSLO "https://github.com/javimosch/machin-bkn/releases/download/$V/SHA256SUMS.txt"
+curl -fsSLO "https://github.com/javimosch/machin-bkn/releases/download/$V/mbkn-$V-linux-amd64"
+grep 'linux-amd64$' SHA256SUMS.txt | sha256sum -c
+install -m755 "mbkn-$V-linux-amd64" ~/.local/bin/mbkn
+```
+
+macOS and Windows binaries are not published: `machin build` has no darwin
+target, and its windows target has no net/TLS — build those from source.
+
 ## Run
 
 ```sh
