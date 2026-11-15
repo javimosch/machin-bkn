@@ -298,7 +298,7 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
   if op == "store.get" {
     ns, coll, refErr := splitRef(argAt(argsJSON, 0))
     if refErr != "" { out = hostErr(refErr)  return }
-    doc, found := getDoc(db, ns, coll, argAt(argsJSON, 1))
+    doc, found := getDoc(db, ns, coll, argAt(argsJSON, 1), "")
     if !found { out = hostOK("null")  return }
     out = hostOK(doc)
     return
@@ -335,7 +335,7 @@ export func hostCall(op, argsJSON, db, name, net) (out) {
   if op == "store.delete" {
     ns, coll, refErr := splitRef(argAt(argsJSON, 0))
     if refErr != "" { out = hostErr(refErr)  return }
-    if deleteDoc(db, ns, coll, argAt(argsJSON, 1)) { out = hostOK("true") } else { out = hostOK("false") }
+    if deleteDoc(db, ns, coll, argAt(argsJSON, 1), "") { out = hostOK("true") } else { out = hostOK("false") }
     return
   }
   if op == "store.list" {

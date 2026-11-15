@@ -69,7 +69,10 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
         upsertID := qGet(q, "id")
         if upsertID == "" { upsertID = jsonField(body, ".id") }
         if upsertID != "" {
-          existing, had := getDoc(gDB, ns, coll, upsertID)
+          // The lookup is scoped, so "exists under a different scope" is not
+          // a conflict at all — it is simply not-found, and the upsert lands
+          // in the caller's own id space.
+          existing, had := getDoc(gDB, ns, coll, upsertID, dec.scopeValue)
           if had && jsonField(existing, "." + dec.scopeField) != dec.scopeValue {
             res = errRes("404 Not Found", "not_found", "record not found")
             return
@@ -88,19 +91,16 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
   }
 
   id := segs[4]
-  // Scope is part of the lookup, not a check beside it: a document that is
-  // not yours was never in the result set, so it answers 404 rather than
-  // 403. A 403 would confirm it exists.
+  // Scope is part of the key, not a check beside it: the lookup itself is
+  // confined to the caller's scope, so a document that is not yours was never
+  // in the result set and answers 404 rather than 403. A 403 would confirm it
+  // exists.
   if dec.scopeField != "" {
-    owned, ownedFound := getDoc(gDB, ns, coll, id)
+    owned, ownedFound := getDoc(gDB, ns, coll, id, dec.scopeValue)
     if !ownedFound { res = errRes("404 Not Found", "not_found", "record not found")  return }
-    if jsonField(owned, "." + dec.scopeField) != dec.scopeValue {
-      res = errRes("404 Not Found", "not_found", "record not found")
-      return
-    }
   }
   if req.method == "GET" {
-    record, found := getDoc(gDB, ns, coll, id)
+    record, found := getDoc(gDB, ns, coll, id, dec.scopeValue)
     if !found { res = errRes("404 Not Found", "not_found", "record not found")  return }
     res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")
     return
@@ -112,7 +112,7 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
       res = errRes("403 Forbidden", "forbidden", "you cannot move this record out of your own scope")
       return
     }
-    record, found, err, status := patchDocIf(gDB, ns, coll, id, req.body, qGet(q, "if"), qGet(q, "if-absent"))
+    record, found, err, status := patchDocIf(gDB, ns, coll, id, req.body, qGet(q, "if"), qGet(q, "if-absent"), dec.scopeValue)
     if status == 409 { res = errRes("409 Conflict", "precondition_failed", err)  return }
     if err != "" { res = errRes("400 Bad Request", "validation_error", err)  return }
     if !found { res = errRes("404 Not Found", "not_found", "record not found")  return }
@@ -120,7 +120,7 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
     return
   }
   if req.method == "DELETE" {
-    if !deleteDoc(gDB, ns, coll, id) { res = errRes("404 Not Found", "not_found", "record not found")  return }
+    if !deleteDoc(gDB, ns, coll, id, dec.scopeValue) { res = errRes("404 Not Found", "not_found", "record not found")  return }
     res = jsonRes("200 OK", "{\"ok\":true,\"deleted\":" + jsonQuote(id) + ",\"collection\":" + jsonQuote(ref) + "}")
     return
   }

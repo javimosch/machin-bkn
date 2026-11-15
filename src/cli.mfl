@@ -416,7 +416,7 @@ func runCLI(a) (code) {
     if a[2] == "get" {
       ns, coll, refErr := splitRef(a[3])
       if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
-      rec, found := getDoc(db, ns, coll, a[4])
+      rec, found := getDoc(db, ns, coll, a[4], "")
       if !found { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
       emit("{\"ok\":true,\"record\":" + rec + "}")
       return
@@ -778,7 +778,7 @@ func runCLI(a) (code) {
     if a[2] == "delete" {
       ns, coll, refErr := splitRef(a[3])
       if refErr != "" { println(cliErrAuto(refErr))  code = cliCodeAuto(refErr)  return }
-      if !deleteDoc(db, ns, coll, a[4]) { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
+      if !deleteDoc(db, ns, coll, a[4], "") { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
       emit("{\"ok\":true,\"deleted\":true}")
       return
     }
@@ -870,7 +870,7 @@ func runCLI(a) (code) {
         i = i + 1
       }
       if patch == "" { println(cliErr(85, "validation_error", "patch needs --data <json|@file|->"))  code = 85  return }
-      rec, found, pErr, _ := patchDocIf(db, ns, coll, a[4], patch, "", "")
+      rec, found, pErr, _ := patchDocIf(db, ns, coll, a[4], patch, "", "", "")
       if pErr != "" { println(cliErrAuto(pErr))  code = cliCodeAuto(pErr)  return }
       if !found { println(cliErr(92, "not_found", "record not found"))  code = 92  return }
       emit("{\"ok\":true,\"record\":" + rec + "}")
