@@ -7,7 +7,7 @@
 // a JSON model. SQLite already has one.
 
 func storeSchema() (s) {
-  s = "CREATE TABLE IF NOT EXISTS collections (ns TEXT NOT NULL, name TEXT NOT NULL, normalize TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, PRIMARY KEY (ns, name)); CREATE TABLE IF NOT EXISTS records (ns TEXT NOT NULL, coll TEXT NOT NULL, id TEXT NOT NULL, doc TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, coll, id)); CREATE INDEX IF NOT EXISTS records_ns_coll ON records(ns, coll, updated_at DESC);"
+  s = "CREATE TABLE IF NOT EXISTS collections (ns TEXT NOT NULL, name TEXT NOT NULL, normalize TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, PRIMARY KEY (ns, name)); CREATE TABLE IF NOT EXISTS records (ns TEXT NOT NULL, coll TEXT NOT NULL, id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', doc TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, coll, scope, id)); CREATE INDEX IF NOT EXISTS records_ns_coll ON records(ns, coll, updated_at DESC);"
 }
 
 func storeOpen(path) (db) {
@@ -18,6 +18,7 @@ func storeOpen(path) (db) {
   // a CLI command touching the same file is the normal case, not the odd one.
   sqlite_exec(db, "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;")
   sqlite_exec(db, storeSchema())
+  recordsMigrate(db)
   sqlite_exec(db, kvSchema())
   sqlite_exec(db, authSchema())
   sqlite_exec(db, filesSchema())
@@ -224,8 +225,9 @@ func whereClause(filters, rulesJSON) (sql, binds) {
       placeholders := []string{}
       // The path is ONE parameter for the whole IN list. Pushing it per value
       // misaligns every bind after the first, which SQLite reports as a
-      // perfectly ordinary empty result.
-      if f.field != "id" { binds = append(binds, "$." + f.field) }
+      // perfectly ordinary empty result. "$scope" is a column like id, never
+      // a document path.
+      if f.field != "id" && f.field != "$scope" { binds = append(binds, "$." + f.field) }
       j := 0
       while j < len(parts) {
         v := trim(parts[j])
@@ -240,6 +242,8 @@ func whereClause(filters, rulesJSON) (sql, binds) {
       while k < len(placeholders) {
         if f.field == "id" {
           if k == 0 { clause = "id IN (" } else { clause = clause + "," }
+        } else if f.field == "$scope" {
+          if k == 0 { clause = "scope IN (" } else { clause = clause + "," }
         } else {
           if k == 0 { clause = "json_extract(doc, ?) IN (" } else { clause = clause + "," }
         }
@@ -253,6 +257,11 @@ func whereClause(filters, rulesJSON) (sql, binds) {
     value := normalizeOne(rulesJSON, f.field, f.value)
     if f.field == "id" {
       sql = sql + " AND id " + sqlOperator(f.op) + " " + bindExpr(value)
+      binds = append(binds, bindValue(value))
+    } else if f.field == "$scope" {
+      // The tenancy scope is a key column, so the predicate lands in the same
+      // WHERE as every other filter — a filter cannot widen it.
+      sql = sql + " AND scope " + sqlOperator(f.op) + " " + bindExpr(value)
       binds = append(binds, bindValue(value))
     } else {
       sql = sql + " AND json_extract(doc, ?) " + sqlOperator(f.op) + " " + bindExpr(value)
@@ -331,8 +340,9 @@ func putDoc(db, ns, coll, explicitID, doc) (record, err) {
 
   id := resolveID(doc, explicitID)
   body := applyNormalizers(db, stripID(db, doc), normalizersOf(db, ns, coll))
+  scope := recordScope(db, ns, coll, body)
   stamp := nowStamp()
-  sqlite_exec(db, "INSERT INTO records (ns, coll, id, doc, created_at, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ns, coll, id) DO UPDATE SET doc = excluded.doc, updated_at = excluded.updated_at", []string{ns, coll, id, body, stamp, stamp})
+  sqlite_exec(db, "INSERT INTO records (ns, coll, id, scope, doc, created_at, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(ns, coll, scope, id) DO UPDATE SET doc = excluded.doc, scope = excluded.scope, updated_at = excluded.updated_at", []string{ns, coll, id, scope, body, stamp, stamp})
   record = withID(db, body, id)
 }
 
@@ -348,11 +358,12 @@ func putIfAbsent(db, ns, coll, explicitID, doc) (record, created, err) {
 
   id := resolveID(doc, explicitID)
   body := applyNormalizers(db, stripID(db, doc), normalizersOf(db, ns, coll))
+  scope := recordScope(db, ns, coll, body)
   stamp := nowStamp()
   before := countAll(db, ns, coll)
-  sqlite_exec(db, "INSERT INTO records (ns, coll, id, doc, created_at, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ns, coll, id) DO NOTHING", []string{ns, coll, id, body, stamp, stamp})
+  sqlite_exec(db, "INSERT INTO records (ns, coll, id, scope, doc, created_at, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(ns, coll, scope, id) DO NOTHING", []string{ns, coll, id, scope, body, stamp, stamp})
   if countAll(db, ns, coll) > before { created = true }
-  existing, found := getDoc(db, ns, coll, id)
+  existing, found := getDoc(db, ns, coll, id, scope)
   if found { record = existing } else { record = withID(db, body, id) }
 }
 
@@ -364,20 +375,36 @@ func countAll(db, ns, coll) (n) {
   if e == "" { n = int(parse(v, 0)) }
 }
 
-func getDoc(db, ns, coll, id) (record, found) {
+// scope is the caller's tenancy value: "" asks for no scope predicate, which
+// resolves to EVERY scope's copy of the id — deterministic, '' first, so an
+// unscoped caller always lands on the same row. A non-empty scope sees only
+// that tenant's copy, which is what makes a stranger's id a 404 rather than
+// a collision.
+func getDoc(db, ns, coll, id, scope) (record, found) {
   record = ""
   found = false
-  rows := sqlite_query(db, "SELECT json_set(doc, '$.id', id) AS d FROM records WHERE ns=? AND coll=? AND id=?", []string{ns, coll, id})
+  sql := "SELECT json_set(doc, '$.id', id) AS d FROM records WHERE ns=? AND coll=? AND id=?"
+  binds := []string{ns, coll, id}
+  if scope != "" { sql = sql + " AND scope=?"  binds = append(binds, scope) }
+  sql = sql + " ORDER BY scope LIMIT 1"
+  rows := sqlite_query(db, sql, binds)
+  if rows == "" { return }
   if rows == "[]" { return }
   record = jsonString(rows, "[0].d", "")
   if record != "" { found = true }
 }
 
-func deleteDoc(db, ns, coll, id) (found) {
+func deleteDoc(db, ns, coll, id, scope) (found) {
   found = false
-  _, exists := getDoc(db, ns, coll, id)
+  _, exists := getDoc(db, ns, coll, id, scope)
   if !exists { return }
-  sqlite_exec(db, "DELETE FROM records WHERE ns=? AND coll=? AND id=?", []string{ns, coll, id})
+  // Delete the same row getDoc resolved to — with several scopes holding the
+  // id, an unscoped caller must not take every tenant's copy with it.
+  sql := "DELETE FROM records WHERE rowid = (SELECT rowid FROM records WHERE ns=? AND coll=? AND id=?"
+  binds := []string{ns, coll, id}
+  if scope != "" { sql = sql + " AND scope=?"  binds = append(binds, scope) }
+  sql = sql + " ORDER BY scope LIMIT 1)"
+  sqlite_exec(db, sql, binds)
   found = true
 }
 
@@ -488,20 +515,22 @@ func preconditionsHold(db, body, ifExpr, ifAbsent) (ok) {
 // one wholesale rather than being deep-merged. Ids are immutable, so the
 // patch cannot move a record.
 func patchDoc(db, ns, coll, id, patch) (record, found, err) {
-  record, found, err, _ = patchDocIf(db, ns, coll, id, patch, "", "")
+  record, found, err, _ = patchDocIf(db, ns, coll, id, patch, "", "", "")
 }
 
 // patchDocIf is patchDoc with the two guards the contract adds: operators,
 // which compute the new value from the current one, and preconditions, which
 // decide whether the write happens at all. status is 0, 400 or 409 so the HTTP
-// layer does not have to infer a code from an error string.
-func patchDocIf(db, ns, coll, id, patch, ifExpr, ifAbsent) (record, found, err, status) {
+// layer does not have to infer a code from an error string. scope is the
+// caller's tenancy value — "" resolves the id across every scope, exactly as
+// getDoc does.
+func patchDocIf(db, ns, coll, id, patch, ifExpr, ifAbsent, scope) (record, found, err, status) {
   record = ""
   found = false
   err = ""
   status = 0
   if !isObject(db, patch) { err = "document must be a JSON object"  status = 400  return }
-  current, exists := getDoc(db, ns, coll, id)
+  current, exists := getDoc(db, ns, coll, id, scope)
   if !exists { return }
 
   body := stripID(db, current)
@@ -523,7 +552,15 @@ func patchDocIf(db, ns, coll, id, patch, ifExpr, ifAbsent) (record, found, err, 
   if rows == "[]" { err = "merge failed"  return }
   merged := applyNormalizers(db, jsonString(rows, "[0].m", body), normalizersOf(db, ns, coll))
 
-  sqlite_exec(db, "UPDATE records SET doc=?, updated_at=? WHERE ns=? AND coll=? AND id=?", []string{merged, nowStamp(), ns, coll, id})
+  // The merge can move the scope field (an unscoped caller may; a scoped one
+  // is refused above), so the key column is recomputed from the result rather
+  // than carried over.
+  newScope := recordScope(db, ns, coll, merged)
+  upd := "UPDATE records SET doc=?, scope=?, updated_at=? WHERE rowid = (SELECT rowid FROM records WHERE ns=? AND coll=? AND id=?"
+  binds := []string{merged, newScope, nowStamp(), ns, coll, id}
+  if scope != "" { upd = upd + " AND scope=?"  binds = append(binds, scope) }
+  upd = upd + " ORDER BY scope LIMIT 1)"
+  sqlite_exec(db, upd, binds)
   record = withID(db, merged, id)
   found = true
 }

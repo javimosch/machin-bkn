@@ -38,10 +38,10 @@ func main() {
   db := storeOpen(":memory:")
   seed(db)
 
-  rec, found := getDoc(db, "dog", "products", "widget")
+  rec, found := getDoc(db, "dog", "products", "widget", "")
   expect("get merges the id in", rec, "{\"name\":\"widget\",\"price\":30,\"stock\":5,\"status\":\"live\",\"id\":\"widget\"}")
   expect("get reports found", str(found), "true")
-  _, missing := getDoc(db, "dog", "products", "nope")
+  _, missing := getDoc(db, "dog", "products", "nope", "")
   expect("get on a missing id", str(missing), "false")
 
   expectN("count all", countAll(db, "dog", "products"), 4)
@@ -82,8 +82,8 @@ func main() {
   nested2, _, _ := patchDoc(db, "dog", "products", "gizmo", "{\"meta\":{\"b\":2}}")
   expect("nested replaces wholesale", nested2, replace(nested, "\"a\":1", "\"b\":2"))
 
-  expect("delete", str(deleteDoc(db, "dog", "products", "thing")), "true")
-  expect("delete again", str(deleteDoc(db, "dog", "products", "thing")), "false")
+  expect("delete", str(deleteDoc(db, "dog", "products", "thing", "")), "true")
+  expect("delete again", str(deleteDoc(db, "dog", "products", "thing", "")), "false")
   expectN("count after delete", countAll(db, "dog", "products"), 3)
 
   first, created1, _ := putIfAbsent(db, "dog", "events", "evt_1", "{\"attempt\":1}")

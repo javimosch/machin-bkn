@@ -71,6 +71,36 @@ func validateAccess(db, acc) (err) {
 func setAccess(db, ns, coll, acc) {
   ensureCollection(db, ns, coll)
   sqlite_exec(db, "UPDATE collections SET access = ? WHERE ns = ? AND name = ?", []string{acc, ns, coll})
+  // The scope value is part of the record key, so declaring or changing a
+  // policy re-keys every row already stored: documents carrying the scope
+  // field become visible to their tenant, the rest stay under ''.
+  f := scopeFieldFor(acc)
+  if f == "" {
+    sqlite_exec(db, "UPDATE records SET scope = '' WHERE ns = ? AND coll = ?", []string{ns, coll})
+  } else {
+    sqlite_exec(db, "UPDATE records SET scope = COALESCE(json_extract(doc, ?), '') WHERE ns = ? AND coll = ?", []string{"$." + f, ns, coll})
+  }
+}
+
+// scopeFieldFor names the ONE document field a collection's record keys are
+// scoped by. A policy that scopes by org keys on org_field, one that scopes
+// by owner on owner_field; a policy naming both takes the org field, because
+// the tenant is the boundary the suite story is built on. A policy with no
+// scoped audience keys everything under ''.
+func scopeFieldFor(acc) (f) {
+  f = ""
+  org := false
+  own := false
+  verbs := []string{"read", "create", "update", "delete"}
+  i := 0
+  while i < len(verbs) {
+    a := jsonField(acc, ".rules." + verbs[i])
+    if a == "org" { org = true }
+    if a == "owner" { own = true }
+    i = i + 1
+  }
+  if org { f = jsonField(acc, ".org_field") }
+  if f == "" { if own { f = jsonField(acc, ".owner_field") } }
 }
 
 // accessDeclared reports whether a collection has any rules at all. "{}" and
@@ -207,11 +237,13 @@ func verbFor(method, hasID) (v) {
 // scopedFilters folds the tenancy scope INTO the caller's filters rather than
 // applying it afterwards. That is what makes "a filter cannot widen the scope"
 // true by construction: the scope is ANDed with whatever was asked for, and
-// the query surface has no OR to escape through.
+// the query surface has no OR to escape through. "$scope" is not a document
+// field — whereClause maps it onto the records.scope key column, so the
+// predicate is part of the key lookup itself.
 func scopedFilters(filters, dec) (out) {
   out = filters
   if dec.scopeField == "" { return }
-  out = append(out, Filter{field: dec.scopeField, op: "eq", value: dec.scopeValue})
+  out = append(out, Filter{field: "$scope", op: "eq", value: dec.scopeValue})
 }
 
 // refusesHandover reports a patch that would move a document out of the

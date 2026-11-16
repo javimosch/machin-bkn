@@ -1,0 +1,84 @@
+// --- scoped record keys -----------------------------------------------------
+//
+// A collection whose access policy names 'org' or 'owner' gives each tenant
+// its own id space: the scope value — the org slug or the user id carried in
+// the document's scope field — is part of the PRIMARY KEY, not a filter
+// applied beside it. Two tenants can then hold the same record id without
+// either seeing, overwriting or tombstoning the other's copy.
+//
+// `scope` is '' for unscoped collections, for documents that never declared
+// the scope field, and for every caller without a scope (admin, CLI, scripts).
+// A scope of '' therefore means BOTH "the unscoped bucket" on writes and "no
+// scope predicate" on reads — the two never collide because a scoped caller's
+// scopeValue is never empty.
+//
+// recordsMigrate lifts an existing (ns, coll, id) table into the keyed shape.
+// SQLite cannot ALTER a primary key, so the table is rebuilt; each row's
+// scope is re-materialized from its document exactly the way recordScope
+// computes it on write, so migrated and new rows agree.
+type CollAccessRow struct { ns string  name string  access string }
+
+func recordsMigrate(db) {
+  rows := sqlite_query(db, "SELECT sql AS s FROM sqlite_master WHERE type = 'table' AND name = 'records'", []string{})
+  if rows == "" { return }
+  if rows == "[]" { return }
+  ddl := jsonString(rows, "[0].s", "")
+  if contains(ddl, "scope") { return }
+
+  // The scope field lives in the collection's access policy, whose column a
+  // pre-policy database does not have yet.
+  accessMigrate(db)
+
+  // A leftover records_mig from an interrupted run must not be renamed over
+  // the live table.
+  sqlite_exec(db, "DROP TABLE IF EXISTS records_mig", []string{})
+  sqlite_exec(db, "BEGIN IMMEDIATE", []string{})
+  sqlite_exec(db, "CREATE TABLE records_mig (ns TEXT NOT NULL, coll TEXT NOT NULL, id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', doc TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (ns, coll, scope, id))", []string{})
+
+  colls := sqlite_query(db, "SELECT ns, name, COALESCE(access, '{}') AS access FROM collections", []string{})
+  if colls != "" && colls != "[]" {
+    parsed := parse(colls, []CollAccessRow{})
+    i := 0
+    while i < len(parsed) {
+      c := parsed[i]
+      f := scopeFieldFor(c.access)
+      if f == "" {
+        sqlite_exec(db, "INSERT INTO records_mig (ns, coll, id, scope, doc, created_at, updated_at) SELECT ns, coll, id, '', doc, created_at, updated_at FROM records WHERE ns = ? AND coll = ?", []string{c.ns, c.name})
+      } else {
+        sqlite_exec(db, "INSERT INTO records_mig (ns, coll, id, scope, doc, created_at, updated_at) SELECT ns, coll, id, COALESCE(json_extract(doc, ?), ''), doc, created_at, updated_at FROM records WHERE ns = ? AND coll = ?", []string{"$." + f, c.ns, c.name})
+      }
+      i = i + 1
+    }
+  }
+  // A record whose collection row is gone still migrates, unscoped.
+  sqlite_exec(db, "INSERT INTO records_mig (ns, coll, id, scope, doc, created_at, updated_at) SELECT r.ns, r.coll, r.id, '', r.doc, r.created_at, r.updated_at FROM records r WHERE NOT EXISTS (SELECT 1 FROM collections c WHERE c.ns = r.ns AND c.name = r.coll)", []string{})
+
+  // Every row must land exactly once before the old table is dropped: a
+  // scope field the extractor could not read would otherwise silently
+  // orphan records, so a count mismatch rolls the whole thing back and the
+  // next open tries again against the untouched table.
+  counts := sqlite_query(db, "SELECT (SELECT COUNT(*) FROM records) AS a, (SELECT COUNT(*) FROM records_mig) AS b", []string{})
+  whole := jsonString(counts, "[0].a", "-1") == jsonString(counts, "[0].b", "-2")
+  if whole {
+    sqlite_exec(db, "DROP TABLE records", []string{})
+    sqlite_exec(db, "ALTER TABLE records_mig RENAME TO records", []string{})
+    sqlite_exec(db, "CREATE INDEX IF NOT EXISTS records_ns_coll ON records(ns, coll, updated_at DESC)", []string{})
+    sqlite_exec(db, "COMMIT", []string{})
+  } else {
+    sqlite_exec(db, "ROLLBACK", []string{})
+  }
+}
+
+// recordScope materializes the collection's scope field into the key column.
+// It reads the field with SQLite's json_extract — the same engine the
+// migration and the policy re-key use — so a value written today and a row
+// migrated yesterday land in the same bucket.
+func recordScope(db, ns, coll, doc) (s) {
+  s = ""
+  f := scopeFieldFor(accessOf(db, ns, coll))
+  if f == "" { return }
+  rows := sqlite_query(db, "SELECT COALESCE(json_extract(?, ?), '') AS s", []string{doc, "$." + f})
+  if rows == "[]" { return }
+  s = jsonString(rows, "[0].s", "")
+}
+
