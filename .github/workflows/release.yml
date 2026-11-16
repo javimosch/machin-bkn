@@ -1,0 +1,125 @@
+name: release
+
+# Cut a release by pushing a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+# This builds mbkn natively for linux/amd64 and linux/arm64 — the static
+# build links OpenSSL, so there is no cross toolchain to lean on — and
+# attaches the binaries plus SHA256SUMS.txt, the same shape as the
+# machin/machin-365 releases. macOS and Windows are out: `machin build`
+# has no darwin target, and its windows target has no net/TLS, which a
+# bkn serve binary cannot do without.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create releases and upload assets
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install static link deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev zlib1g-dev libzstd-dev
+
+      - name: Install machin v0.142.0
+        run: |
+          curl -fsSL -o /tmp/machin \
+            "https://github.com/javimosch/machin/releases/download/v0.142.0/machin-v0.142.0-linux-${{ matrix.arch }}"
+          chmod +x /tmp/machin
+          sudo mv /tmp/machin /usr/local/bin/machin
+          echo "MACHIN=/usr/local/bin/machin" >> "$GITHUB_ENV"
+
+      - name: Fetch machin framework (MACHIN_FW)
+        run: |
+          git clone --depth 1 --branch v0.142.0 \
+            https://github.com/javimosch/machin.git /tmp/machin-fw
+          echo "MACHIN_FW=/tmp/machin-fw/framework" >> "$GITHUB_ENV"
+
+      - name: Build mbkn
+        run: |
+          mkdir -p dist
+          ./build.sh cmd/serve.mfl -o "dist/mbkn-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}"
+          file "dist/mbkn-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}"
+
+      - name: Smoke test on this arch
+        run: |
+          ./test/auth-cli.sh "dist/mbkn-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}" | tail -2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mbkn-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # RELEASE GUARD, same shape as machin's release.yml: a tag push is not
+      # a protected operation, so prove the tagged commit is on main and that
+      # CI went green on it before anything is published.
+      - name: Verify the tag is on main and CI passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${GITHUB_SHA}"
+          echo "tagged commit: $SHA"
+
+          git fetch --quiet origin main
+
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not contained in origin/main — refusing to release a commit that is not on the default branch."
+            exit 1
+          fi
+          echo "  on main: yes"
+
+          CONCLUSION=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&status=completed" \
+            --jq '[.workflow_runs[] | select(.name == "ci")] | first | .conclusion // "none"')
+          echo "  ci conclusion: $CONCLUSION"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::CI for $SHA is '${CONCLUSION}', not 'success' — refusing to release an unverified commit. Wait for CI, or fix it, then re-tag."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ( cd dist && sha256sum mbkn-* > SHA256SUMS.txt && ls -l )
+          # If a release already exists for this tag (e.g. authored by hand),
+          # attach/overwrite the binaries; otherwise create it with notes
+          # generated from the commit history.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "mbkn $TAG" \
+              --generate-notes
+          fi
