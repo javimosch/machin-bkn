@@ -667,7 +667,7 @@ func runCLI(a) (code) {
     if a[2] == "member" {
       if a[3] == "remove" {
         ok, err := removeMember(db, a[4], a[5])
-        if err != "" { println(cliErr(92, "not_found", err))  code = 92  return }
+        if err != "" { println(cliErrAuto(err))  code = cliCodeAuto(err)  return }
         if !ok { println(cliErr(92, "not_found", "membership not found"))  code = 92  return }
         emit("{\"ok\":true,\"removed\":true}")
         return
@@ -1176,6 +1176,8 @@ func errKind(msg) (code, kind) {
   kind = "validation_error"
   if has_suffix(msg, "not found") { code = 92  kind = "not_found"  return }
   if index(msg, "already exists") >= 0 { code = 95  kind = "already_exists"  return }
+  if index(msg, "already a member") >= 0 { code = 95  kind = "already_exists"  return }
+  if index(msg, "last owner") >= 0 { code = 95  kind = "conflict"  return }
 }
 
 // Emit a library error with the code its message implies.

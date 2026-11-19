@@ -244,6 +244,10 @@ func validOrgRole(r) (ok) {
   if r == "member" { ok = true }
 }
 
+// addMember is add-only: "add" must not double as "change role". Re-adding
+// an existing member used to upsert the role, which let one routine call
+// demote the last owner and leave the org unadministrable. A role change is
+// remove-then-add, and the last-owner guard on removeMember still applies.
 func addMember(db, orgRef, userRef, role) (err) {
   err = ""
   if role == "" { role = "member" }
@@ -252,7 +256,9 @@ func addMember(db, orgRef, userRef, role) (err) {
   if !orgFound { err = "organization not found"  return }
   u, userFound := findUser(db, userRef)
   if !userFound { err = "user not found"  return }
-  sqlite_exec(db, "INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?,?,?,?) ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role", []string{o.id, u.id, role, nowStamp()})
+  _, already := membershipRole(db, o.id, u.id)
+  if already { err = "user is already a member of this organization"  return }
+  sqlite_exec(db, "INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?,?,?,?)", []string{o.id, u.id, role, nowStamp()})
 }
 
 func membershipsOf(db, userID) (out, count) {
@@ -279,6 +285,20 @@ func membershipRole(db, orgID, userID) (role, found) {
   if rows == "[]" { return }
   role = jsonField(rows, "[0].role")
   if role != "" { found = true }
+}
+
+// orgMemberStats counts an org's members and owners in one query. Both
+// last-owner guards — removeMember here and the member routes in serve —
+// ask exactly this question, so it is answered in one place.
+func orgMemberStats(db, orgID) (members, owners) {
+  members = 0
+  owners = 0
+  rows := sqlite_query(db, "SELECT (SELECT COUNT(*) FROM memberships WHERE org_id = ?) AS m, (SELECT COUNT(*) FROM memberships WHERE org_id = ? AND role = 'owner') AS o", []string{orgID, orgID})
+  if rows == "[]" { return }
+  mv, me := json_get(rows, "[0].m")
+  if me == "" { members = int(parse(mv, 0)) }
+  ov, oe := json_get(rows, "[0].o")
+  if oe == "" { owners = int(parse(ov, 0)) }
 }
 
 // --- sessions -------------------------------------------------------------
@@ -414,6 +434,18 @@ func removeMember(db, orgRef, userRef) (ok, err) {
   if !orgFound { err = "organization not found"  return }
   u, userFound := findUser(db, userRef)
   if !userFound { err = "user not found"  return }
+  cur, isMember := membershipRole(db, o.id, u.id)
+  if isMember && cur == "owner" {
+    // Removing the last owner while other members remain leaves an org
+    // nobody can administer: every membership write needs owner/admin, and
+    // recovery takes the server admin token. Emptying the org entirely is
+    // allowed — that is the same state as a freshly created one.
+    mems, owns := orgMemberStats(db, o.id)
+    if mems-1 > 0 && owns-1 == 0 {
+      err = "cannot remove the last owner while the organization still has members"
+      return
+    }
+  }
   sqlite_exec(db, "DELETE FROM memberships WHERE org_id = ? AND user_id = ?", []string{o.id, u.id})
   ok = true
 }
