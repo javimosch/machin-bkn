@@ -142,6 +142,8 @@ func authStatus(err) (status, kind) {
   if err == "token is malformed or its signature does not match" { status = "401 Unauthorized"  kind = "bad_token" }
   if err == "a user with that email already exists" { status = "409 Conflict"  kind = "already_exists" }
   if err == "an organization with that slug already exists" { status = "409 Conflict"  kind = "already_exists" }
+  if err == "user is already a member of this organization" { status = "409 Conflict"  kind = "already_exists" }
+  if err == "cannot remove the last owner while the organization still has members" { status = "409 Conflict"  kind = "conflict" }
   if err == "email is not valid" { status = "400 Bad Request"  kind = "validation_error" }
   if err == "password must be at least 8 characters" { status = "400 Bad Request"  kind = "validation_error" }
   if err == "role must be one of: user, admin" { status = "400 Bad Request"  kind = "validation_error" }
@@ -336,6 +338,23 @@ func authRoutes(req, q, segs) (res) {
         if !canWrite { res = errRes("403 Forbidden", "forbidden", "you need to be admin of this organization")  return }
         uref := jsonField(req.body, ".user")
         mrole := jsonField(req.body, ".role")
+        if mrole == "" { mrole = "member" }
+        // Only an owner mints an owner: an admin who could grant owner
+        // could add a confederate and then remove the real owners.
+        if mrole == "owner" && !isAdmin && !roleAtLeast(role, "owner") {
+          res = errRes("403 Forbidden", "forbidden", "only an owner can grant the owner role")
+          return
+        }
+        // An org with members must have an owner. Adding anybody below
+        // owner to an ownerless org would leave it unadministrable — the
+        // same bricking the last-owner guard on remove exists to prevent.
+        if mrole != "owner" {
+          _, owns := orgMemberStats(gDB, o.id)
+          if owns == 0 {
+            res = errRes("409 Conflict", "conflict", "organization has no owner; add a member with role owner first")
+            return
+          }
+        }
         merr := addMember(gDB, segs[3], uref, mrole)
         if merr != "" {
           st, kind := authStatus(merr)
@@ -344,13 +363,24 @@ func authRoutes(req, q, segs) (res) {
         }
         tu, tfound := findUser(gDB, uref)
         if !tfound { res = errRes("404 Not Found", "not_found", "user not found")  return }
-        if mrole == "" { mrole = "member" }
         mem := memberJSON(o.id, o.slug, tu.id, tu.email, mrole, nowStamp())
         res = jsonRes("201 Created", "{\"ok\":true,\"membership\":" + mem + "}")
         return
       }
       if req.method == "DELETE" && len(segs) == 6 {
         if !canWrite { res = errRes("403 Forbidden", "forbidden", "you need to be admin of this organization")  return }
+        // Revoking owner is owner work too — an admin must not strip the
+        // org's owners one by one.
+        if !isAdmin && !roleAtLeast(role, "owner") {
+          tu, tfound := findUser(gDB, segs[5])
+          if tfound {
+            trole, tmember := membershipRole(gDB, o.id, tu.id)
+            if tmember && trole == "owner" {
+              res = errRes("403 Forbidden", "forbidden", "only an owner can remove an owner")
+              return
+            }
+          }
+        }
         ok, derr := removeMember(gDB, segs[3], segs[5])
         if derr != "" {
           st, kind := authStatus(derr)

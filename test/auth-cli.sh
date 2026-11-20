@@ -78,5 +78,21 @@ chk "unknown user: sessions"     "$(rc "$M" auth sessions ghost@x.io)" "92"
 chk "unknown user: revoke"       "$(rc "$M" auth revoke ghost@x.io)" "92"
 chk "unknown user: delete"       "$(rc "$M" auth user delete ghost@x.io)" "92"
 
+# --- member writes cannot orphan an org ------------------------------------
+# "add" is add-only: re-adding must conflict, not silently demote. And no
+# write may leave a populated org without an owner.
+"$M" auth user create own@dog.io --password own-pw-1234 >/dev/null
+"$M" auth user create mem@dog.io --password mem-pw-1234 >/dev/null
+"$M" auth org create guarded --name Guarded >/dev/null
+"$M" auth member add guarded own@dog.io --role owner >/dev/null
+"$M" auth member add guarded mem@dog.io --role member >/dev/null
+chk "re-add conflicts, not demotes" "$(rc "$M" auth member add guarded own@dog.io --role member)" "95"
+chk "the owner role survived"       "$("$M" auth member list guarded </dev/null | j 'str(d["members"][1]["role"])')" "owner"
+chk "last owner remove refused"     "$(rc "$M" auth member remove guarded own@dog.io)" "95"
+chk "and the owner is still there"  "$("$M" auth member list guarded </dev/null | j 'str(d["members"][1]["role"])')" "owner"
+chk "a plain member still removes"  "$("$M" auth member remove guarded mem@dog.io </dev/null | j 'str(d["removed"])')" "True"
+chk "the sole member may leave"     "$("$M" auth member remove guarded own@dog.io </dev/null | j 'str(d["removed"])')" "True"
+chk "emptying leaves zero members"  "$("$M" auth member list guarded </dev/null | j 'str(len(d["members"]))')" "0"
+
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]
