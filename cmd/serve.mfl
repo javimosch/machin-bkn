@@ -903,6 +903,63 @@ func kvRoutes(req, q, segs) (res) {
   res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
 }
 
+// collectionsRoutes is the suite's sync-discovery probe. It answers which
+// collections exist FOR THIS CALLER, not which exist: every row goes through
+// the same decideAccess the store routes use, with the read verb, so a
+// collection name the token could not list records under is never
+// enumerated. The count is scoped the same way the record listing scopes it,
+// so a tenant cannot read another tenant's totals out of the listing either.
+type CollListRow struct { ns string  name string  created_at string  access string }
+
+func collectionsRoutes(req, q, segs) (res) {
+  if len(segs) != 2 { res = errRes("404 Not Found", "not_found", "no such route")  return }
+  if req.method != "GET" { res = errRes("405 Method Not Allowed", "method_not_allowed", "use GET")  return }
+
+  // Caller resolution is the store dispatch's, verbatim: admin short-circuits,
+  // a user token contributes its id and org claim, anything else is anonymous.
+  isAdmin := authed(req, gAdmin, gHost)
+  tok := bearer(req)
+  hasToken := tok != ""
+  sub := ""
+  org := ""
+  if hasToken && !isAdmin {
+    whoJ, whoClaims, whoErr := meFromToken(gDB, tok)
+    if whoErr == "" {
+      sub = jsonField(whoJ, ".id")
+      org = jsonField(whoClaims, ".org")
+    }
+  }
+
+  ns := qGet(q, "ns")
+  sql := "SELECT ns AS ns, name AS name, created_at AS created_at, COALESCE(access, '{}') AS access FROM collections"
+  binds := []string{}
+  if ns != "" {
+    sql = sql + " WHERE ns = ?"
+    binds = append(binds, ns)
+  }
+  sql = sql + " ORDER BY ns, name"
+  rows := sqlite_query(gDB, sql, binds)
+
+  parts := []string{}
+  if rows != "[]" {
+    parsed := parse(rows, []CollListRow{})
+    i := 0
+    while i < len(parsed) {
+      c := parsed[i]
+      dec := decideAccess(gDB, c.access, "read", isAdmin, hasToken, sub, org)
+      if dec.allow {
+        n := countDocs(gDB, c.ns, c.name, scopedFilters([]Filter{}, dec))
+        parts = append(parts, "{\"ref\":" + jsonQuote(c.ns + "/" + c.name) +
+          ",\"count\":" + str(n) +
+          ",\"normalize\":" + normalizersOf(gDB, c.ns, c.name) +
+          ",\"created_at\":" + jsonQuote(c.created_at) + "}")
+      }
+      i = i + 1
+    }
+  }
+  res = jsonRes("200 OK", "{\"ok\":true,\"count\":" + str(len(parts)) + ",\"collections\":[" + join(parts, ",") + "]}")
+}
+
 // Takes the handle rather than reading gDB: gDB is set only by the server, so
 // this silently answered 0 for every CLI caller -- `store list` reported
 // "count": 0 next to two records.
@@ -1006,6 +1063,10 @@ func handle(req) (res) {
       }
       if segs[1] == "kv" {
         res = kvRoutes(req, q, segs)
+        return
+      }
+      if segs[1] == "collections" {
+        res = collectionsRoutes(req, q, segs)
         return
       }
     }

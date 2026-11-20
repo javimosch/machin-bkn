@@ -100,5 +100,25 @@ chk "member PUT to public refused"      "$(st PUT /v1/store/shared/notes "$ALICE
 chk "member may still declare org rules" "$(st PUT /v1/store/shared/notes "$ALICE" '{"access":{"rules":{"read":"org","create":"org"},"org_field":"org"}}')" "200"
 chk "and now reads are org-scoped"      "$(req POST /v1/store/shared/notes "$BOB" '{"note":"hi"}' >/dev/null; req GET '/v1/store/shared/notes' "$ALICE" '' | j 'd["count"]')" "0"
 
+# --- /v1/collections: discovery lists only what the token can read --------
+# The suite's sync probe. A collection the caller could not read records
+# under must not be enumerable by name, and the per-collection count is
+# scoped the same way the record listing scopes it.
+ALICE_COLLS=$(req GET /v1/collections "$ALICE" '')
+chk "alice lists only readable collections" "$(echo "$ALICE_COLLS" | j 'sorted(c["ref"] for c in d["collections"])')" "['m365/tasks', 'shared/notes']"
+chk "and the envelope count agrees"         "$(echo "$ALICE_COLLS" | j 'd["count"]')" "2"
+chk "admin-private is not enumerated"       "$(echo "$ALICE_COLLS" | j 'any(c["ref"] == "ops/private" for c in d["collections"])')" "False"
+chk "entry shape matches the CLI's"         "$(echo "$ALICE_COLLS" | j 'sorted(d["collections"][0].keys())')" "['count', 'created_at', 'normalize', 'ref']"
+chk "m365/tasks count is scoped to her org" "$(echo "$ALICE_COLLS" | j '[c["count"] for c in d["collections"] if c["ref"] == "m365/tasks"][0]')" "1"
+chk "bob sees the same readable set"        "$(req GET /v1/collections "$BOB" '' | j 'sorted(c["ref"] for c in d["collections"])')" "['m365/tasks', 'shared/notes']"
+chk "admin sees every collection"           "$(req GET /v1/collections adm '' | j 'sorted(c["ref"] for c in d["collections"])')" "['m365/tasks', 'ops/private', 'shared/notes']"
+chk "admin count is unscoped"               "$(req GET /v1/collections adm '' | j '[c["count"] for c in d["collections"] if c["ref"] == "m365/tasks"][0]')" "2"
+chk "orgless token sees no org collections" "$(req GET /v1/collections "$ALICE_NOORG" '' | j 'd["collections"]')" "[]"
+chk "anonymous sees only public reads"      "$(req GET /v1/collections '' '' | j 'd["collections"]')" "[]"
+chk "?ns= filters like the CLI's --ns"      "$(req GET '/v1/collections?ns=m365' "$ALICE" '' | j '[c["ref"] for c in d["collections"]]')" "['m365/tasks']"
+chk "?ns= on a hidden ns stays empty"       "$(req GET '/v1/collections?ns=ops' "$ALICE" '' | j 'd["count"]')" "0"
+chk "a subpath is not a route"              "$(st GET /v1/collections/extra "$ALICE" '')" "404"
+chk "POST is not a route"                   "$(st POST /v1/collections "$ALICE" '')" "405"
+
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]
