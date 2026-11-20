@@ -1083,17 +1083,25 @@ func handle(req) (res) {
         storeTok := bearer(req)
         storeSub := ""
         storeOrg := ""
+        // hasToken means a VALID credential, not a non-empty header: an
+        // invalid bearer taking the !hasToken path gets the same 401 as no
+        // credential, where presence-only would satisfy every 'user' rule and
+        // answer org-scoped collections with a 403 no client refreshes on.
+        storeTokOK := false
         if storeTok != "" {
-          if !storeAdmin {
+          if storeAdmin {
+            storeTokOK = true
+          } else {
             whoJ, whoClaims, whoErr := meFromToken(gDB, storeTok)
             if whoErr == "" {
               storeSub = jsonField(whoJ, ".id")
               storeOrg = jsonField(whoClaims, ".org")
+              storeTokOK = true
             }
           }
         }
         storeAcc := accessOf(gDB, segs[2], segs[3])
-        dec := decideAccess(gDB, storeAcc, verbFor(req.method, len(segs) >= 5), storeAdmin, storeTok != "", storeSub, storeOrg)
+        dec := decideAccess(gDB, storeAcc, verbFor(req.method, len(segs) >= 5), storeAdmin, storeTokOK, storeSub, storeOrg)
         // Self-service provisioning: a member whose token carries an org may
         // declare a collection nobody has declared yet — the suite story is
         // "signup, install, sync", and requiring the operator to pre-declare
