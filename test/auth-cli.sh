@@ -63,6 +63,10 @@ chk "--enable restores"          "$("$M" auth user update dev@dog.io --enable </
 
 chk "member remove"              "$("$M" auth member remove acme dev@dog.io </dev/null | j 'str(d["removed"])')" "True"
 chk "and the membership is gone" "$("$M" auth memberships dev@dog.io </dev/null | j 'str(d["count"])')" "1"
+# ACC is still an unexpired JWT scoped to acme — removal must kill it now,
+# not when its 15 minutes are up.
+chk "me refuses the stale org token" "$(rc "$M" auth me "$ACC")" "85"
+chk "and names the reason"       "$("$M" auth me "$ACC" </dev/null | j 'd["error"]["message"]')" "user is not a member of that organization"
 chk "org delete"                 "$("$M" auth org delete other </dev/null | j 'str(d["deleted"])')" "True"
 chk "the org is gone"            "$(rc "$M" auth org show other)" "92"
 # deleting an org must not delete its people
@@ -93,6 +97,20 @@ chk "and the owner is still there"  "$("$M" auth member list guarded </dev/null 
 chk "a plain member still removes"  "$("$M" auth member remove guarded mem@dog.io </dev/null | j 'str(d["removed"])')" "True"
 chk "the sole member may leave"     "$("$M" auth member remove guarded own@dog.io </dev/null | j 'str(d["removed"])')" "True"
 chk "emptying leaves zero members"  "$("$M" auth member list guarded </dev/null | j 'str(len(d["members"]))')" "0"
+
+# --- member removal revokes that org's sessions ----------------------------
+# Sessions carry the org they were scoped to, so removal kills only those —
+# an orgless session of the same user is a different tenant's business.
+"$M" auth user create leaver@dog.io --password leaver-pw-123 >/dev/null
+"$M" auth org create leavers --name Leavers >/dev/null
+"$M" auth member add leavers leaver@dog.io --role member >/dev/null
+LR=$("$M" auth login leaver@dog.io --password leaver-pw-123 --org leavers </dev/null | j 'd["tokens"]["refresh_token"]')
+LA=$("$M" auth login leaver@dog.io --password leaver-pw-123 --org leavers </dev/null | j 'd["tokens"]["access_token"]')
+"$M" auth login leaver@dog.io --password leaver-pw-123 </dev/null >/dev/null
+"$M" auth member remove leavers leaver@dog.io </dev/null >/dev/null
+chk "the org session is revoked"   "$("$M" auth sessions leaver@dog.io </dev/null | j '[ (s["org"],s["active"]) for s in d["sessions"] if s["org"]=="leavers" ][0]')" "('leavers', False)"
+chk "its refresh is dead"          "$("$M" auth refresh "$LR" </dev/null | j 'd["error"]["message"]')" "refresh token is unknown, revoked or expired"
+chk "the orgless session survives" "$("$M" auth sessions leaver@dog.io </dev/null | j 'str([s["active"] for s in d["sessions"] if s["org"]==""][0])')" "True"
 
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]

@@ -389,7 +389,11 @@ func logout(db, refresh) {
 }
 
 // me resolves a token against the LIVE user record, so a disabled or deleted
-// account stops working before its access token expires.
+// account stops working before its access token expires. An org claim gets
+// the same treatment: membership is the tenancy boundary, and a removed
+// member's token must stop working now, not at exp. The live role is written
+// back into the claims, so a demotion does not keep answering with the rank
+// the token was minted with.
 func meFromToken(db, token) (user, claims, err) {
   user = ""
   claims = ""
@@ -400,8 +404,22 @@ func meFromToken(db, token) (user, claims, err) {
   u, found := findUser(db, sub)
   if !found { err = "user not found"  return }
   if u.disabled == 1 { err = "user is disabled"  return }
-  user = userJSON(u)
   claims = parsed
+  orgSlug := jsonField(parsed, ".org")
+  if orgSlug != "" {
+    // One indexed lookup answers both questions the claim raises: is the
+    // user still a member (a deleted org joins to nothing, so it fails here
+    // too), and with what role — memberships.role is never ''.
+    rows := sqlite_query(db, "SELECT m.role AS role FROM memberships m JOIN orgs o ON o.id = m.org_id WHERE o.slug = ? AND m.user_id = ?", []string{orgSlug, u.id})
+    liveRole := ""
+    if rows != "[]" { liveRole = jsonField(rows, "[0].role") }
+    if liveRole == "" { err = "user is not a member of that organization"  return }
+    if jsonField(parsed, ".org_role") != liveRole {
+      fixed := sqlite_query(db, "SELECT json_set(?, ?, ?) AS d", []string{parsed, "$.org_role", liveRole})
+      claims = jsonString(fixed, "[0].d", parsed)
+    }
+  }
+  user = userJSON(u)
 }
 
 // The read/write half of the identity surface that the sandbox needs and the
@@ -447,6 +465,12 @@ func removeMember(db, orgRef, userRef) (ok, err) {
     }
   }
   sqlite_exec(db, "DELETE FROM memberships WHERE org_id = ? AND user_id = ?", []string{o.id, u.id})
+  // Sessions carry the org they were scoped to, so only this org's die here —
+  // the member's sessions in other orgs are untouched. Refresh would refuse
+  // them anyway (issueTokens re-checks membership) and meFromToken now
+  // refuses their access tokens; revoking anyway keeps `auth sessions`
+  // honest and stops a re-added member's old session silently coming back.
+  sqlite_exec(db, "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND org = ? AND revoked_at = ''", []string{nowStamp(), u.id, o.slug})
   ok = true
 }
 
