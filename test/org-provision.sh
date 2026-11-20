@@ -120,5 +120,30 @@ chk "?ns= on a hidden ns stays empty"       "$(req GET '/v1/collections?ns=ops' 
 chk "a subpath is not a route"              "$(st GET /v1/collections/extra "$ALICE" '')" "404"
 chk "POST is not a route"                   "$(st POST /v1/collections "$ALICE" '')" "405"
 
+# --- removing a member kills their org-scoped access NOW, not at exp ------
+# The access token is a 15-minute JWT; membership is the live check. Before
+# the fix a removed member kept read/write/delete on every org record until
+# the token expired.
+req POST /v1/auth/orgs/aliceorg/members "$ALICE" '{"user":"bob@example.com","role":"member"}' >/dev/null
+BOB_ALICE=$(req POST /v1/auth/login '' '{"email":"bob@example.com","password":"bob-pass-123","org":"aliceorg"}' | j 'd["tokens"]["access_token"]')
+BOB_ALICE_R=$(req POST /v1/auth/login '' '{"email":"bob@example.com","password":"bob-pass-123","org":"aliceorg"}' | j 'd["tokens"]["refresh_token"]')
+chk "added member reads the org"            "$(req GET '/v1/store/m365/tasks' "$BOB_ALICE" '' | j 'd["count"]')" "1"
+chk "and /me reports the live role"        "$(req GET /v1/auth/me "$BOB_ALICE" '' | j 'd["claims"]["org"]+"/"+d["claims"]["org_role"]')" "aliceorg/member"
+
+req DELETE /v1/auth/orgs/aliceorg/members/bob@example.com "$ALICE" '' >/dev/null
+chk "removed member GET is refused"        "$(st GET /v1/store/m365/tasks "$BOB_ALICE" '')" "403"
+chk "removed member POST is refused"       "$(st POST /v1/store/m365/tasks "$BOB_ALICE" '{"title":"intrusion"}')" "403"
+chk "removed member DELETE is refused"     "$(st DELETE "/v1/store/m365/tasks/$ALICE_ID" "$BOB_ALICE" '')" "403"
+chk "and /me says not_a_member"            "$(req GET /v1/auth/me "$BOB_ALICE" '' | j 'd["error"]["type"]')" "not_a_member"
+chk "the scoped refresh is dead"           "$(st POST /v1/auth/refresh '' "{\"refresh_token\":\"$BOB_ALICE_R\"}")" "401"
+chk "collections no longer lists it"       "$(req GET /v1/collections "$BOB_ALICE" '' | j 'd["collections"]')" "[]"
+# his boborg session is a different tenant's problem — it must survive
+chk "his other org's token still works"    "$(req GET '/v1/store/shared/notes' "$BOB" '' | j 'str(d["ok"])')" "True"
+# and re-adding restores access through the same still-valid JWT
+req POST /v1/auth/orgs/aliceorg/members "$ALICE" '{"user":"bob@example.com","role":"admin"}' >/dev/null
+chk "re-added member reads again"          "$(req GET '/v1/store/m365/tasks' "$BOB_ALICE" '' | j 'd["count"]')" "1"
+chk "with the live role, not the stale one" "$(req GET /v1/auth/me "$BOB_ALICE" '' | j 'd["claims"]["org_role"]')" "admin"
+req DELETE /v1/auth/orgs/aliceorg/members/bob@example.com "$ALICE" '' >/dev/null
+
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]
