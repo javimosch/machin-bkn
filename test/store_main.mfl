@@ -35,6 +35,9 @@ func field(doc, path) (out) {
 func f1(field, op, value) (out) { out = []Filter{Filter{field: field, op: op, value: value}} }
 
 func main() {
+  // newID() mints under the lock ulidKeeper holds; putDoc with no explicit id
+  // needs it running first.
+  go ulidKeeper()
   db := storeOpen(":memory:")
   seed(db)
 
@@ -81,6 +84,29 @@ func main() {
   nested, _, _ := patchDoc(db, "dog", "products", "gizmo", "{\"meta\":{\"a\":1}}")
   nested2, _, _ := patchDoc(db, "dog", "products", "gizmo", "{\"meta\":{\"b\":2}}")
   expect("nested replaces wholesale", nested2, replace(nested, "\"a\":1", "\"b\":2"))
+
+  // ?if= types its value the way a filter does: a boolean literal must match
+  // the JSON boolean, not just the 1/0 that json_extract coerces it to.
+  _, _ = putDoc(db, "dog", "flags", "f1", "{\"done\":false,\"n\":7,\"s\":\"x\"}")
+  _, _, _, st := patchDocIf(db, "dog", "flags", "f1", "{\"a\":1}", "done=false", "", "")
+  expectN("if=done=false matches JSON false", st, 0)
+  _, _, _, st2 := patchDocIf(db, "dog", "flags", "f1", "{\"b\":2}", "done=true", "", "")
+  expectN("if=done=true refuses JSON false", st2, 409)
+  kept, _ := getDoc(db, "dog", "flags", "f1", "")
+  expect("a refused precondition writes nothing", str(contains(kept, "\"b\":2")), "false")
+  _, _, _, st3 := patchDocIf(db, "dog", "flags", "f1", "{\"c\":3}", "n=7", "", "")
+  expectN("if=n=7 still matches a number", st3, 0)
+  _, _, _, st4 := patchDocIf(db, "dog", "flags", "f1", "{\"d\":4}", "s=x", "", "")
+  expectN("if=s=x still matches a string", st4, 0)
+  _, _, _, st5 := patchDocIf(db, "dog", "flags", "f1", "{\"e\":5}", "done=0", "", "")
+  expectN("if=done=0 keeps matching the coerced form", st5, 0)
+  _, _, _, st6 := patchDocIf(db, "dog", "flags", "f1", "{\"done\":true}", "", "", "")
+  _, _, _, st7 := patchDocIf(db, "dog", "flags", "f1", "{\"f\":6}", "done=true", "", "")
+  expectN("if=done=true matches JSON true", st7, 0)
+  _, _, _, st8 := patchDocIf(db, "dog", "flags", "f1", "{\"claimed\":1}", "", "claimed", "")
+  expectN("if-absent claims once", st8, 0)
+  _, _, _, st9 := patchDocIf(db, "dog", "flags", "f1", "{\"claimed\":2}", "", "claimed", "")
+  expectN("if-absent refuses the second", st9, 409)
 
   expect("delete", str(deleteDoc(db, "dog", "products", "thing", "")), "true")
   expect("delete again", str(deleteDoc(db, "dog", "products", "thing", "")), "false")

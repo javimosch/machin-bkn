@@ -495,15 +495,19 @@ func sqlQuote(v) (s) {
 //
 // ?if=field=value and ?if-absent=field are checked against the document being
 // written and ANDed. A failed precondition writes NOTHING. There is no OR.
-func preconditionsHold(db, body, ifExpr, ifAbsent) (ok) {
+func preconditionsHold(db, body, rulesJSON, ifExpr, ifAbsent) (ok) {
     ok = true
     if ifExpr != "" {
         eq := index(ifExpr, "=")
         if eq < 0 { ok = false  return }
         f := substr(ifExpr, 0, eq)
-        want := substr(ifExpr, eq+1, len(ifExpr))
-        rows := sqlite_query(db, "SELECT COALESCE(json_extract(?, ?), '') AS v", []string{body, "$." + f})
-        if jsonString(rows, "[0].v", "") != want { ok = false  return }
+        want := normalizeOne(rulesJSON, f, substr(ifExpr, eq+1, len(ifExpr)))
+        // The value is typed the way a filter types it — true/false and
+        // numbers compare as that type, everything else as text — because
+        // json_extract coerces a JSON boolean to 1/0 and a bare string
+        // compare can never spell `done=false`.
+        rows := sqlite_query(db, "SELECT CASE WHEN COALESCE(json_extract(?, ?), '') = " + bindExpr(want) + " THEN 1 ELSE 0 END AS ok", []string{body, "$." + f, bindValue(want)})
+        if jsonString(rows, "[0].ok", "0") != "1" { ok = false  return }
     }
     if ifAbsent != "" {
         rows2 := sqlite_query(db, "SELECT COALESCE(json_extract(?, ?), '') AS v", []string{body, "$." + ifAbsent})
@@ -536,7 +540,8 @@ func patchDocIf(db, ns, coll, id, patch, ifExpr, ifAbsent, scope) (record, found
   body := stripID(db, current)
   // Checked against the document being written, and ANDed. A failure writes
   // nothing — which is what makes --if-absent a claim exactly once.
-  if !preconditionsHold(db, body, ifExpr, ifAbsent) {
+  rules := normalizersOf(db, ns, coll)
+  if !preconditionsHold(db, body, rules, ifExpr, ifAbsent) {
     err = "precondition failed"
     status = 409
     found = true
@@ -550,7 +555,7 @@ func patchDocIf(db, ns, coll, id, patch, ifExpr, ifAbsent, scope) (record, found
   sql := "SELECT json_group_object(key, " + cell + ") AS m FROM (SELECT key, value, type FROM json_each(?) WHERE key NOT IN (SELECT key FROM json_each(?)) UNION ALL SELECT key, value, type FROM json_each(?))"
   rows := sqlite_query(db, sql, []string{body, clean, clean})
   if rows == "[]" { err = "merge failed"  return }
-  merged := applyNormalizers(db, jsonString(rows, "[0].m", body), normalizersOf(db, ns, coll))
+  merged := applyNormalizers(db, jsonString(rows, "[0].m", body), rules)
 
   // The merge can move the scope field (an unscoped caller may; a scoped one
   // is refused above), so the key column is recomputed from the result rather
