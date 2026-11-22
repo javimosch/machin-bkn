@@ -129,6 +129,13 @@ ten and thirty seconds and the odd empty body; from the host, 200 requests ran
 with a median of 0.08s and nothing over a second. The Go bkn behind the same
 Traefik stalled too, which is what ruled the server out.
 
+`./test/demo-probe.sh` is the cheap staleness check: nine unauthenticated
+probes against the public surface, among them `GET /v1/collections` — the
+route whose absence proved the demo predated main by four commits (#18).
+`/version` carries no commit, so a missing route is the only honest signal;
+the probe fails with "route missing — demo is stale" when the deployment
+predates what main serves. `.github/workflows/demo-probe.yml` runs it daily.
+
 It holds the test fixtures and nothing else, every admin route is behind a
 token, and it binds the host's docker bridge rather than a public address —
 Traefik terminates TLS and is the only way in.
