@@ -236,6 +236,24 @@ SERR=$(timeout 3 "$M" serve --port $((SPORT+1)) 2>&1 1>/dev/null | head -1)
 chk "serve says nothing on stdout" "${SOUT:-empty}" "empty"
 chk "and announces on stderr"      "$(echo "$SERR" | grep -c 'listening on http://')" "1"
 
+# --- serve flag parsing -------------------------------------------------------
+# --port=$P is what scripts actually write; it used to be ignored and the
+# server bound the default while looking healthy. --help used to bind a port.
+EP=$((26000 + RANDOM % 9000))
+"$M" serve --port=$EP >/dev/null 2>&1 &
+ESRV=$!
+for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$EP/_health" >/dev/null && break; sleep 0.1; done
+chk "equals form binds the asked port" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$EP/_health")" "200"
+kill $ESRV 2>/dev/null
+chk "serve --help answers, not binds"  "$("$M" serve --help </dev/null | j 'd["command"]+"/"+str(d["ok"])')" "serve/True"
+chk "and exits 0"                      "$(rc "$M" serve --help)" "0"
+chk "-h is the same"                   "$(rc "$M" serve -h)" "0"
+chk "an unknown flag is a usage error" "$(rc "$M" serve --bogus)" "80"
+chk "a stray positional is too"        "$(rc "$M" serve stray)" "80"
+chk "a bad port value is rejected"     "$(rc "$M" serve --port=abc)" "85"
+chk "and the space form agrees"        "$(rc "$M" serve --port abc)" "85"
+chk "a missing value is rejected"      "$(rc "$M" serve --port)" "85"
+
 # HOME is not set for a systemd service, and the first deployment of this
 # wrote its shutdown token to /.bkn -- the filesystem ROOT -- because
 # `$HOME + "/.bkn"` with an empty HOME is `/.bkn`. It worked, somewhere no
