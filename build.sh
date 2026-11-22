@@ -3,7 +3,21 @@
 # build is: every library, then exactly one file with main().
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-MACHIN="${MACHIN:-$HOME/ai/machin/bin/machin}"
+
+# Resolve the compiler: an explicit MACHIN wins, then PATH (a release-binary
+# install), then a source checkout at ~/ai/machin. Defaulting to only the
+# checkout broke every fresh clone on a host that installed machin from a
+# release.
+if [ -z "${MACHIN:-}" ]; then
+  if command -v machin >/dev/null 2>&1; then
+    MACHIN="$(command -v machin)"
+  elif [ -x "$HOME/ai/machin/bin/machin" ]; then
+    MACHIN="$HOME/ai/machin/bin/machin"
+  else
+    echo "build.sh: no machin compiler found — install machin (https://github.com/javimosch/machin) or set MACHIN=/path/to/machin" >&2
+    exit 1
+  fi
+fi
 MAIN="${1:?usage: build.sh <file-with-main.mfl> [-o out]}"
 shift || true
 OUT="$(mktemp /tmp/machin-bkn-XXXX.mfl)"
@@ -21,12 +35,45 @@ extern "bknqjs" {
   fn bkn_js_eval(string, string, int, int, int, string, string) string
 }
 EOF
-FW="${MACHIN_FW:-$HOME/ai/machin/framework}"
 
 # `encode` takes every source at once and concatenates them — appending after a
 # lone `encode` of the framework yields a file the compiler sees as empty.
 if grep -lq "serve(" "$MAIN" 2>/dev/null; then
-  "$MACHIN" encode "$FW/machweb.src" "$HERE"/src/*.mfl "$MAIN" > "$OUT"
+  # machweb.src comes from the compiler's embedded framework by default.
+  # `encode` resolves framework/*.src from the binary when no local file
+  # exists, and a local copy always wins — so defaulting MACHIN_FW to a
+  # ~/ai/machin/framework checkout let a stale tree silently override a
+  # fresher embedded framework. MACHIN_FW stays as an explicit override (CI
+  # builds against framework@main).
+  if [ -n "${MACHIN_FW:-}" ]; then
+    FW_SRC="$MACHIN_FW/machweb.src"
+  else
+    # Snapshot the embedded module so the freshness gate below checks the
+    # exact bytes `encode` will see.
+    FW_SRC="$(mktemp /tmp/machin-bkn-fw-XXXXXXXX)"
+    "$MACHIN" framework machweb.src > "$FW_SRC" 2>/dev/null || true
+  fi
+
+  # Freshness gate: cmd/serve.mfl calls serve_on_quiet, which entered
+  # machweb.src after older compilers were built. Without this check a stale
+  # machin dies at typecheck with "call to undefined function" — three
+  # stages from the cause.
+  if [ ! -f "$FW_SRC" ]; then
+    echo "build.sh: machweb framework not found at $FW_SRC — set MACHIN_FW to a directory containing machweb.src" >&2
+    exit 1
+  fi
+  if ! grep -q "serve_on_quiet" "$FW_SRC"; then
+    cat >&2 <<'EOF'
+build.sh: the machweb framework resolved for this build has no serve_on_quiet,
+which cmd/serve.mfl calls — the machin compiler is too old (serve_on_quiet
+landed in machin v0.141.0).
+
+Rebuild or reinstall machin from https://github.com/javimosch/machin, or set
+MACHIN=/path/to/newer-machin (or MACHIN_FW=/path/to/newer-framework).
+EOF
+    exit 1
+  fi
+  "$MACHIN" encode "$FW_SRC" "$HERE"/src/*.mfl "$MAIN" > "$OUT"
 else
   "$MACHIN" encode "$HERE"/src/*.mfl "$MAIN" > "$OUT"
 fi

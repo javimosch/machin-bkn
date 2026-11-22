@@ -41,8 +41,11 @@ means something real was only ever written down in Go.
 
 ## Build
 
-Needs the [machin](https://github.com/javimosch/machin) compiler and
-`libssl-dev` (static archives, for `--static`).
+Needs the [machin](https://github.com/javimosch/machin) compiler (≥ v0.141.0 —
+build.sh checks before compiling) and `libssl-dev` (static archives, for
+`--static`). `build.sh` finds machin on `PATH`, falling back to
+`~/ai/machin/bin/machin`; override with `MACHIN=/path/to/machin` or
+`MACHIN_FW=/path/to/framework`.
 
 ```sh
 ./build.sh cmd/serve.mfl -o bin/bkn
