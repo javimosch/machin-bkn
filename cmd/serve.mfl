@@ -1171,12 +1171,60 @@ func main() {
   p := env("BKN_PORT")
   if p != "" { if looksNumeric(p) { port = int(parse(p, 0)) } }
   // Flags win over the environment: a harness that starts its own instance on
-  // a random port says so on the command line.
+  // a random port says so on the command line. Both spellings parse —
+  // `--port 9000` and `--port=9000` — because the equals form is what $PORT
+  // expansion writes in scripts. Anything unrecognized is a usage error, not
+  // a flag to ignore: `serve --help` answering by binding a port, or
+  // `--port=$PORT` landing on the default while the process looks healthy, is
+  // the surprise this loop exists to prevent.
   fi := 2
   while fi < len(a) {
-    if a[fi] == "--host" { if fi+1 < len(a) { gHost = a[fi+1] } }
-    if a[fi] == "--port" { if fi+1 < len(a) { if looksNumeric(a[fi+1]) { port = int(parse(a[fi+1], 0)) } } }
-    fi = fi + 1
+    arg := a[fi]
+    if arg == "-h" || arg == "--help" {
+      emit("{\"ok\":true,\"command\":\"serve\",\"usage\":\"bkn serve [--host <h>] [--port <n>]\",\"flags\":{\"--host\":\"bind address (default 127.0.0.1, env BKN_HOST)\",\"--port\":\"listen port (default 7799, env BKN_PORT)\"},\"env\":[\"BKN_DATA\",\"BKN_ADMIN_TOKEN\",\"BKN_ENCRYPTION_KEY\"],\"see_also\":[\"bkn help-json\",\"bkn guide\"]}")
+      return
+    }
+    fname := ""
+    fval := ""
+    fhas := false
+    fspace := false
+    if arg == "--host" || arg == "--port" {
+      fname = arg
+      fspace = true
+      if fi+1 < len(a) { fval = a[fi+1]  fhas = true }
+    } else {
+      if has_prefix(arg, "--host=") { fname = "--host"  fval = substr(arg, 7, len(arg))  fhas = true }
+      if has_prefix(arg, "--port=") { fname = "--port"  fval = substr(arg, 7, len(arg))  fhas = true }
+    }
+    if fname != "" {
+      if !fhas || fval == "" {
+        println(cliErr(85, "invalid_argument_value", fname + " needs a value"))
+        exit(85)
+      }
+      if fname == "--host" {
+        // No hostname begins with '-'; one here means the flag's value is
+        // missing and the next token is another flag.
+        if has_prefix(fval, "-") {
+          println(cliErr(85, "invalid_argument_value", "--host needs a value"))
+          exit(85)
+        }
+        gHost = fval
+      }
+      if fname == "--port" {
+        pv := 0
+        pok := looksNumeric(fval) && index(fval, ".") < 0 && index(fval, "-") < 0
+        if pok { pv = int(parse(fval, 0))  pok = pv >= 1 && pv <= 65535 }
+        if !pok {
+          println(cliErr(85, "invalid_argument_value", "--port must be an integer between 1 and 65535, got " + fval))
+          exit(85)
+        }
+        port = pv
+      }
+      if fspace { fi = fi + 2 } else { fi = fi + 1 }
+      continue
+    }
+    println(cliErrS(80, "invalid_arguments", "serve takes only --host and --port", []string{"bkn serve --help", "bkn help-json"}))
+    exit(80)
   }
 
   gDB = storeOpen(path)
