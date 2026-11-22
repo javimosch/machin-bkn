@@ -86,6 +86,24 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
       res = jsonRes("200 OK", "{\"ok\":true,\"record\":" + record + "}")
       return
     }
+    if req.method == "DELETE" {
+      // The id rides the query string, not a path segment: an id may itself
+      // contain '/', which segments cannot carry — the suite's "<ref>|<id>"
+      // tombstone ids are exactly that shape. The path is never percent-
+      // decoded, so %2F cannot smuggle one through either. ?id= mirrors the
+      // upsert form POST already accepts.
+      delID := qGet(q, "id")
+      if delID == "" { res = errRes("400 Bad Request", "invalid_arguments", "DELETE needs ?id=<record id>")  return }
+      // Same scope pre-check the record route applies: a document outside the
+      // caller's scope was never theirs to delete, so it answers 404.
+      if dec.scopeField != "" {
+        owned, ownedFound := getDoc(gDB, ns, coll, delID, dec.scopeValue)
+        if !ownedFound { res = errRes("404 Not Found", "not_found", "record not found")  return }
+      }
+      if !deleteDoc(gDB, ns, coll, delID, dec.scopeValue) { res = errRes("404 Not Found", "not_found", "record not found")  return }
+      res = jsonRes("200 OK", "{\"ok\":true,\"deleted\":" + jsonQuote(delID) + ",\"collection\":" + jsonQuote(ref) + "}")
+      return
+    }
     res = errRes("405 Method Not Allowed", "method_not_allowed", "unsupported method " + req.method)
     return
   }
