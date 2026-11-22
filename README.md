@@ -143,6 +143,16 @@ It holds the test fixtures and nothing else, every admin route is behind a
 token, and it binds the host's docker bridge rather than a public address —
 Traefik terminates TLS and is the only way in.
 
+`./test/release-probe.sh` is the same idea for the artifact users install:
+it downloads the latest GitHub release binary, boots it, and runs the demo
+probe's nine checks against it — plus a git-distance check over the paths
+that compile into the binary (`cmd/`, `src/`, `vendor/`, `build.sh`), so a
+release that is merely *behind* main fails even when every public route
+still answers. That second check exists because v0.2.0 sat eight commits
+behind with a member-removal security fix inside it (#26), invisible to any
+unauthenticated probe.
+`.github/workflows/release-probe.yml` runs it daily.
+
 ## Verifying it against the contract
 
 bkn's suites were written against its **live** instance and assume data seeded

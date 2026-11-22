@@ -1,0 +1,35 @@
+name: release-probe
+
+# The demo has demo-probe; the release artifact had nothing — v0.2.0 shipped
+# eight commits behind main (issue #26), including a member-removal security
+# fix, and `machin-365 service install` kept handing it to every new user.
+# This runs test/release-probe.sh daily: it downloads the latest release
+# binary, boots it, and checks both its public route surface and its git
+# distance from main over the paths that compile into the binary, so
+# release lag surfaces in the Actions tab instead of in a user's sync log.
+#
+# When it goes red on currency: cut a tag on green main —
+#   git tag v0.3.0 origin/main && git push origin v0.3.0
+# The release workflow verifies the tag is on main with green CI before
+# publishing anything. When it goes red on the surface probes, the release
+# predates a route main serves; same fix.
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, offset from demo-probe's 41 5
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the currency check needs tag..main history
+      - name: Probe the latest release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./test/release-probe.sh
