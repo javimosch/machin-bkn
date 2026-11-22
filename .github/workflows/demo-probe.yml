@@ -1,0 +1,24 @@
+name: demo-probe
+
+# The demo at machin-bkn.vps1.intrane.fr is deployed by hand. It has twice
+# fallen weeks behind main before anyone noticed (#7, #18). This runs
+# test/demo-probe.sh daily — a cheap behavioral check that the deployment
+# still answers the routes main serves — so staleness surfaces in days.
+#
+# It cannot tell "how far behind" the demo is, only that a probed route is
+# missing. When it goes red, redeploy per the runbook in AGENTS.md / the
+# issue #7 procedure: build from main, scp to vps1:/opt/machin-bkn/bkn,
+# systemctl restart machin-bkn.
+
+on:
+  schedule:
+    - cron: "41 5 * * *" # daily, off the top of the hour
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe the demo instance
+        run: ./test/demo-probe.sh
