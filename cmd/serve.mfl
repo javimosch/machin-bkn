@@ -1181,7 +1181,7 @@ func main() {
   while fi < len(a) {
     arg := a[fi]
     if arg == "-h" || arg == "--help" {
-      emit("{\"ok\":true,\"command\":\"serve\",\"usage\":\"bkn serve [--host <h>] [--port <n>]\",\"flags\":{\"--host\":\"bind address (default 127.0.0.1, env BKN_HOST)\",\"--port\":\"listen port (default 7799, env BKN_PORT)\"},\"env\":[\"BKN_DATA\",\"BKN_ADMIN_TOKEN\",\"BKN_ENCRYPTION_KEY\"],\"see_also\":[\"bkn help-json\",\"bkn guide\"]}")
+      emit("{\"ok\":true,\"command\":\"serve\",\"usage\":\"bkn serve [--host <h>] [--port <n>]\",\"flags\":{\"--host\":\"bind address (default 127.0.0.1, env BKN_HOST)\",\"--port\":\"listen port (default 7799, env BKN_PORT)\"},\"env\":[\"BKN_DATA\",\"BKN_HOST\",\"BKN_PORT\",\"BKN_ADMIN_TOKEN\",\"BKN_ENCRYPTION_KEY\",\"BKN_OPEN_SIGNUP\"],\"notes\":[\"BKN_OPEN_SIGNUP=1 enables self-service registration (POST /v1/auth/register); it answers 403 without it\"],\"see_also\":[\"bkn help-json\",\"bkn guide\"]}")
       return
     }
     fname := ""

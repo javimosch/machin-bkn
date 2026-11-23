@@ -1353,5 +1353,5 @@ func helpJSON() (s) {
   cmds = append(cmds, "\"guide\":{\"args\":[],\"flags\":[\"--human\"]}")
   cmds = append(cmds, "\"version\":{\"args\":[],\"flags\":[]}")
   cmds = append(cmds, "\"help-json\":{\"args\":[],\"flags\":[]}")
-  s = "{\"ok\":true,\"version\":\"1.0\",\"exit_codes\":{\"0\":\"ok\",\"80\":\"invalid arguments or unknown command\",\"85\":\"validation error\",\"92\":\"not found\",\"110\":\"internal error\"},\"commands\":{" + join(cmds, ",") + "}}"
+  s = "{\"ok\":true,\"version\":\"1.0\",\"exit_codes\":{\"0\":\"ok\",\"80\":\"invalid arguments or unknown command\",\"85\":\"validation error\",\"92\":\"not found\",\"110\":\"internal error\"},\"env\":[\"BKN_DATA\",\"BKN_HOST\",\"BKN_PORT\",\"BKN_ADMIN_TOKEN\",\"BKN_OPEN_SIGNUP\",\"BKN_AUTH_SECRET\",\"BKN_ENCRYPTION_KEY\",\"BKN_ENCRYPTION_KEYS\",\"BKN_ENCRYPTION_KEY_ID\",\"SUPERBACKEND_ENCRYPTION_KEY\",\"SAASBACKEND_ENCRYPTION_KEY\",\"BKN_FILES_DIR\",\"BKN_HOME\"],\"commands\":{" + join(cmds, ",") + "}}"
 }

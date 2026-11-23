@@ -100,6 +100,7 @@ bin/bkn kv rekey
 | `BKN_DATA` | datastore path (default `bkn.db`) |
 | `BKN_HOST` / `BKN_PORT` | serve bind defaults (`127.0.0.1` / `7799`); flags win |
 | `BKN_ADMIN_TOKEN` | bearer token gating every admin route |
+| `BKN_OPEN_SIGNUP` | set to `1` to allow self-service `POST /v1/auth/register` — required for `machin-365 auth signup`; off by default |
 | `BKN_ENCRYPTION_KEY` | 32 chars; required for `kv --type encrypted`. Always stamps key id `v1` |
 | `BKN_ENCRYPTION_KEYS` | the SET of keys that may decrypt, as `id:material` pairs — `"v1:$OLD,v2:$NEW"` |
 | `BKN_ENCRYPTION_KEY_ID` | which of them seals new values (default `v1`) |

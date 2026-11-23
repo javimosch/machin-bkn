@@ -230,6 +230,14 @@ mbkn hooks create cms --script cms --rate-limit 300
 BKN_PORT=48200 BKN_ADMIN_TOKEN=dogfood mbkn serve &
 ```
 
+The runbook never sets `BKN_OPEN_SIGNUP`: every user and org above is
+admin-created, so the gate does not exercise self-service signup.
+`POST /v1/auth/register` — what `machin-365 auth signup` calls — answers 403
+`self-service registration is disabled` unless the server runs with
+`BKN_OPEN_SIGNUP=1`. That is a deployment property, not a token privilege
+(#29): the var is documented in the README env table, `serve --help`,
+`bkn guide` and `bkn help-json`.
+
 Never send setup output to /dev/null. A `script create` that silently failed
 under database contention cost five confusing red assertions in the cms phase
 before the cause was obvious — the CLI had printed the problem and the
