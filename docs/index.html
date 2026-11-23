@@ -175,7 +175,8 @@ linked as a static archive, so the result is one file with no runtime dependenci
 
 <div class="arch">./build.sh cmd/serve.mfl -o bin/bkn
 
-<i># BKN_DATA names the database; BKN_ADMIN_TOKEN gates every admin route</i>
+<i># BKN_DATA names the database; BKN_ADMIN_TOKEN gates every admin route;
+# BKN_OPEN_SIGNUP=1 opens self-service signup (POST /v1/auth/register)</i>
 bin/bkn serve --host 127.0.0.1 --port 7799
 bin/bkn <b>guide</b>            <i># the whole mental model, embedded in the binary</i>
 bin/bkn <b>help-json</b>        <i># the command catalog</i></div>

@@ -17,7 +17,7 @@ func guideJSON() (s) {
   model = append(model, "\"two planes\":\"The data plane (store/kv/files/events) is what applications call. The control plane (script, hooks, cron, auth admin) is operator work and is admin-gated by default.\"")
 
   loop := []string{}
-  loop = append(loop, "\"Start a server: bkn serve --host 127.0.0.1 --port 7799 (BKN_DATA names the database, BKN_ADMIN_TOKEN gates every admin route).\"")
+  loop = append(loop, "\"Start a server: bkn serve --host 127.0.0.1 --port 7799 (BKN_DATA names the database, BKN_ADMIN_TOKEN gates every admin route, BKN_OPEN_SIGNUP=1 opens self-service signup).\"")
   loop = append(loop, "\"Write documents into a namespaced collection: bkn store put myapp/users --data '{...}'.\"")
   loop = append(loop, "\"Read them back over HTTP the same way an application would: curl $HOST/v1/store/myapp/users.\"")
   loop = append(loop, "\"Declare who may read and write a collection by PUTting the collection itself: curl -X PUT $HOST/v1/store/myapp/users -d '{\\\"access\\\":{\\\"rules\\\":{\\\"read\\\":\\\"public\\\"}}}'. An undeclared verb is admin-only.\"")
@@ -55,6 +55,7 @@ func guideJSON() (s) {
   gotchas = append(gotchas, "\"An undeclared access policy is admin-only, and so is an undeclared script run-access. Nothing you installed before policies existed loosens when you upgrade.\"")
   gotchas = append(gotchas, "\"A 401 means a credential would help; a 403 means it would not. A script or collection you may not reach is deliberately indistinguishable from one that does not exist, so 404s cannot enumerate what an operator installed.\"")
   gotchas = append(gotchas, "\"BKN_ADMIN_TOKEN gates every admin route. Binding off-loopback without one leaves the control plane open; --host defaults to 127.0.0.1 for that reason.\"")
+  gotchas = append(gotchas, "\"Self-service registration is off unless BKN_OPEN_SIGNUP=1. An open registration endpoint is a property of the deployment, not of whoever last held a token.\"")
   gotchas = append(gotchas, "\"A script's entry point is function main(input). ES module syntax (export default) is a syntax error in the sandbox.\"")
   gotchas = append(gotchas, "\"A hook passes the request body to the script unmodified, because re-serializing before hashing breaks every provider signature.\"")
   gotchas = append(gotchas, "\"Encrypted kv values need BKN_ENCRYPTION_KEY. Lose it and those values are unreadable -- there is no recovery path, by design.\"")
