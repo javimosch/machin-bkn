@@ -108,7 +108,12 @@ func storeRoutes(req, q, segs, dec) (res, handled) {
     return
   }
 
-  id := segs[4]
+  // An id may itself contain '/': the suite's "<ref>|<id>" tombstones are
+  // exactly that shape. The path form addresses it as extra segments, so the
+  // id is everything after <ns>/<coll> rejoined — /x/y is record "x/y",
+  // never a silent read of "x". Joining cannot collide: it agrees with the
+  // ?id= form the collection route already takes.
+  id := join(segs[4:], "/")
   // Scope is part of the key, not a check beside it: the lookup itself is
   // confined to the caller's scope, so a document that is not yours was never
   // in the result set and answers 404 rather than 403. A 403 would confirm it
