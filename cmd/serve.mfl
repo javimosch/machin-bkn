@@ -942,14 +942,17 @@ func collectionsRoutes(req, q, segs) (res) {
   // a user token contributes its id and org claim, anything else is anonymous.
   isAdmin := authed(req, gAdmin, gHost)
   tok := bearer(req)
-  hasToken := tok != ""
+  // As on the store route: only a VALID credential counts, so an invalid
+  // bearer lists exactly what an anonymous caller does.
+  hasToken := false
   sub := ""
   org := ""
-  if hasToken && !isAdmin {
+  if tok != "" && !isAdmin {
     whoJ, whoClaims, whoErr := meFromToken(gDB, tok)
     if whoErr == "" {
       sub = jsonField(whoJ, ".id")
       org = jsonField(whoClaims, ".org")
+      hasToken = true
     }
   }
 

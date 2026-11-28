@@ -87,10 +87,20 @@ chk "owner scope stamped sub"     "$(req GET /v1/store/m365/ownertest "$ALICE_NO
 chk "admin token unaffected"      "$(st GET /v1/store/m365/usertest adm '')" "200"
 chk "admin reads undeclared"      "$(st GET /v1/store/m365/private adm '')" "200"
 
+# --- the collection listing resolves callers the same way ------------------
+refs() { req GET /v1/collections "$1" '' | j '",".join(sorted(c["ref"] for c in d["collections"]))'; }
+ANON_REFS=$(refs '')
+chk "anon lists only public"      "$ANON_REFS" "m365/pubtest"
+chk "garbage lists as anonymous"  "$(refs "$GARBAGE")" "$ANON_REFS"
+chk "jwt-shaped lists as anon"    "$(refs "$JWTISH")" "$ANON_REFS"
+chk "valid user lists more"       "$(refs "$ALICE_NOORG")" "m365/ownertest,m365/pubtest,m365/usertest"
+chk "admin lists user coll"       "$(refs adm | tr , '\n' | grep -c '^m365/usertest$')" "1"
+
 # --- a disabled user's token is not a credential either --------------------
 chk "admin disables alice"        "$(st PATCH /v1/auth/users/alice@example.com adm '{"disabled":true}')" "200"
 chk "disabled token on user 401"  "$(st GET /v1/store/m365/usertest "$ALICE_NOORG" '')" "401"
 chk "disabled token on org 401"   "$(st GET /v1/store/m365/orgtest "$ALICE" '')" "401"
+chk "disabled token lists as anon" "$(refs "$ALICE_NOORG")" "$ANON_REFS"
 
 echo "   [$PASS passed, $FAIL failed]"
 [ "$FAIL" -eq 0 ]

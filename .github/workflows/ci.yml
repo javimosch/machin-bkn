@@ -33,7 +33,7 @@ jobs:
       - name: Build bkn binary
         run: ./build.sh cmd/serve.mfl -o bkn
 
-      - name: Test suites (352 assertions)
+      - name: Test suites (358 assertions)
         run: |
           set -o pipefail
           for t in auth-cli catalog cli-surface concurrency store-auth; do
