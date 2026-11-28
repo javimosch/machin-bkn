@@ -33,10 +33,10 @@ jobs:
       - name: Build bkn binary
         run: ./build.sh cmd/serve.mfl -o bkn
 
-      - name: Test suites (320 assertions)
+      - name: Test suites (352 assertions)
         run: |
           set -o pipefail
-          for t in auth-cli catalog cli-surface concurrency; do
+          for t in auth-cli catalog cli-surface concurrency store-auth; do
             echo "=== $t ==="
             ./test/$t.sh ./bkn | tail -2
           done
